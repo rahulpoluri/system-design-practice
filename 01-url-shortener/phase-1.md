@@ -57,7 +57,27 @@ Request body:
 
 ## 4. Data model — PostgreSQL
 
-**urls**: `id BIGINT PK (BIGSERIAL)` · `long_url TEXT` · `expires_at TIMESTAMP` · (`short_code` not stored)
+One table: **`urls`**
+
+| Column | Type | Constraints | Notes |
+|---|---|---|---|
+| `id` | `BIGINT` | `PRIMARY KEY`, auto-increment (`BIGSERIAL`) | the counter; `short_code = encode(id)` |
+| `long_url` | `TEXT` | `NOT NULL`, max 1,024 chars (checked in the API) | the redirect target |
+| `expires_at` | `TIMESTAMPTZ` | `NOT NULL` | `created + 5 years`; used by redirect (`410`) and cleanup |
+
+```sql
+CREATE TABLE urls (
+    id         BIGSERIAL PRIMARY KEY,
+    long_url   TEXT        NOT NULL CHECK (length(long_url) <= 1024),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+-- start the counter at 64^4 so every code is exactly 5 chars
+ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
+```
+
+**`short_code` is not stored** — it's computed from `id` (encode) and back (decode), so no extra column and no extra index.
+**Indexes:** only the PK. Redirect = PK lookup. Cleanup deletes by `id` range (lowest ids expire first), so no index on `expires_at` is needed.
+**Duplicates:** the same long URL submitted twice gets two codes — fine for Phase 1 (no dedup index on `long_url`).
 
 **Why Postgres:** access is pure key-value by PK, no joins · load is tiny (one primary handles it) · need an atomic counter (`BIGSERIAL`/`nextval()`) · mature replication + failover (WAL streaming, Patroni). NoSQL (DynamoDB/Cassandra) is the option at Phase 3 scale.
 
@@ -159,4 +179,5 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 - [ ] Explain eventual consistency in my own words.
 - [ ] Back-of-the-envelope calculators: practise.
 - [ ] Index-size estimate and `hash % N` reasoning were marked "??" — confirm I can explain both.
+- [ ] CDN vs 302 conflict: section 3 says every click reaches us, section 8 says CDN caches the redirect — decide (no CDN for redirects, or short `max-age`).
 - [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
