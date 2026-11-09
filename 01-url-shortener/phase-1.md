@@ -1,10 +1,21 @@
 # URL Shortener — Phase 1
 
 ## 1. Requirements
-- Create a short URL · redirect to the long URL
-- 1M writes/month (peak 3×) · 10M reads/month (peak 10×) · not evenly distributed
-- No sign-in, no analytics · retention 5 years · fixed-length codes
-- NFRs: availability 99.99% · latency p99 < 100 ms · eventual consistency
+
+**Functional**
+- Create a short URL from a long URL
+- Redirect a short URL to its long URL
+- Fixed-length codes
+- Links expire after 5 years
+
+**Non-functional**
+- Scale: 1M writes/month (peak 3×) · 10M reads/month (peak 10×) · not evenly distributed
+- Availability 99.99%
+- Latency p99 < 100 ms
+- Eventual consistency is acceptable
+
+**Out of scope (Phase 1)**
+- Sign-in · analytics
 
 ## 2. Back-of-the-envelope
 | | Calculation | Result |
