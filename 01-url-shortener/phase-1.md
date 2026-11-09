@@ -1,21 +1,12 @@
-# 01 — URL Shortener
+# URL Shortener — Phase 1
 
 ## 1. Requirements
-
-**Functional**
-- **Phase 1:** create a short URL, redirect to the long URL. Fixed-length codes. Retention 5 years. No sign-in, no analytics.
-- **Phase 2:** sign in · cancel (delete) own URLs · list all URLs I created · analytics per URL (clicks per day, per region).
-- **Phase 3:** 1 billion requests / month.
-
-**Non-functional**
-- Availability **99.99%**
-- Latency **p99 < 100 ms**
-- **Eventual consistency** is acceptable
-
-**Load (Phase 1):** 1M writes/month (peak 3×), 10M reads/month (peak 10×), traffic not evenly distributed.
+- Create a short URL · redirect to the long URL
+- 1M writes/month (peak 3×) · 10M reads/month (peak 10×) · not evenly distributed
+- No sign-in, no analytics · retention 5 years · fixed-length codes
+- NFRs: availability 99.99% · latency p99 < 100 ms · eventual consistency
 
 ## 2. Back-of-the-envelope
-
 | | Calculation | Result |
 |---|---|---|
 | Writes (peak) | 1M × 3 / 2,592,000 s | ≈ 1.2 / s |
@@ -31,28 +22,13 @@
 
 ## 3. API
 
-**`GET /{short_code}`** → `302` temporary redirect + `Location: <long_url>` (no browser cache, so every click reaches us) · `404` not found · `410` expired/deleted · `500` · `503`
+**`GET /{short_code}`** → `302` temporary redirect + `Location: <long_url>` (no browser cache, so every click reaches us) · `404 {"detail": "Requested URL not found"}` · `410` expired · `500` · `503 {"detail": "Server unavailable"}`
 
-**`POST /api/v1/urls`** body `{long_url, expires_at}` → `201 {short_url}` + header `Location: /{code}` · `422` validation · `429` rate limited · `500` · `503`
-
-**`POST /api/v1/login`** form `{email, password}` → `200 {access_token: <jwt>, token_type: "bearer"}` · `401` wrong credentials · `422` · `429` · `500` · `503`
-
-**`GET /api/v1/urls/{short_code}/analytics?from=&to=`** header `Authorization: Bearer <jwt>` → `200`:
-```json
-{
-  "short_url": "...", "long_url": "...", "created_at": "...",
-  "clicks": [{"day": "2026-12-22", "region": "EU", "clicks": 42}]
-}
-```
-`401` invalid/expired token · `404` · `500` · `503`
+**`POST /api/v1/short-urls`** body `{"long_url": "..."}` → `201 {"short_url": "..."}` + header `Location: /{code}` · `422` validation · `429 {"detail": "Too many requests"}` · `500` · `503`
 
 ## 4. Data model — PostgreSQL
 
-**users**: `id BIGINT PK` · `email VARCHAR UNIQUE` · `password_hash` · `joined_at TIMESTAMP`
-
-**urls**: `id BIGINT PK (BIGSERIAL)` · `long_url TEXT` · `created_at` · `expires_at DATE` (indexed, for cleanup) · `deleted_at TIMESTAMP NULL` (soft delete) · `user_id BIGINT FK NULL` (indexed, for "list my URLs")
-
-**url_clicks_daily**: `url_id FK` · `day DATE` · `region` · `clicks BIGINT` — composite PK `(url_id, day, region)`, which also serves as the index for lookups by `url_id`.
+**urls**: `id BIGINT PK (BIGSERIAL)` · `long_url TEXT` · `expires_at TIMESTAMP` · (`short_code` not stored)
 
 **Why Postgres:** access is pure key-value by PK, no joins · load is tiny (one primary handles it) · need an atomic counter (`BIGSERIAL`/`nextval()`) · mature replication + failover (WAL streaming, Patroni). NoSQL (DynamoDB/Cassandra) is the option at Phase 3 scale.
 
@@ -142,21 +118,8 @@ Fixes: CDN caches the redirect response at the edge (catch: first click on a new
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
 
-## 8. Trade-offs & open gaps (as of 2026-11-09)
-
-**Phase 2 — still missing**
-- [ ] **Analytics pipeline:** how clicks reach `url_clicks_daily` (redirect → click event to queue → worker aggregates → `INSERT … ON CONFLICT DO UPDATE clicks = clicks + n`). Region from GeoIP / CDN header.
-- [ ] **CDN vs analytics conflict:** redirects cached at the CDN never reach our servers → clicks invisible. Options: `302` + `Cache-Control: no-store`, CDN logs, or edge worker.
-- [ ] **Endpoints:** signup · `DELETE /api/v1/urls/{code}` (soft delete + **evict cache** + `204`) · `GET /api/v1/urls` (pagination).
-- [ ] **AuthZ:** JWT = who you are, not what you can access → ownership check (`url.user_id == user.id`) else `403`.
-- [ ] **Rate limiter** design behind the `429`s (e.g. token bucket in Redis, per IP / per user).
-- [ ] Updated diagram (auth, queue, workers, cleanup job).
-- [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
-
-**Phase 3 (1B requests/month) — not started**
-- [ ] Re-do numbers · sharding · ID generation without one central counter (range allocation per server) · NoSQL option.
-
-**Small**
+## 8. Open gaps
 - [ ] Explain eventual consistency in my own words.
 - [ ] Back-of-the-envelope calculators: practise.
 - [ ] Index-size estimate and `hash % N` reasoning were marked "??" — confirm I can explain both.
+- [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
