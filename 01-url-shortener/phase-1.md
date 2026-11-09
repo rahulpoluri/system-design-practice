@@ -11,7 +11,7 @@
 **Non-functional**
 - Scale: 1M writes/month (peak 3×) · 10M reads/month (peak 10×) · not evenly distributed
 - Availability 99.99%
-- Latency p99 < 100 ms
+- Latency p99 < 100 ms for users on the same continent as the data centre (single region)
 - Eventual consistency is acceptable
 
 **Out of scope (Phase 1)**
@@ -168,10 +168,10 @@ Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
 | Redis hit | ~1 ms |
 | Postgres PK lookup (index in RAM) | 2–10 ms |
 
-Cache hit ≈ 25–55 ms · miss ≈ 30–65 ms → fits. Breaks for other continents (Mumbai → Frankfurt ≈ 150 ms network alone).
-Fix: read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
+Cache hit ≈ 25–55 ms · miss ≈ 30–65 ms → fits the same-continent NFR. Other continents are out of scope for Phase 1 (Mumbai → Frankfurt ≈ 150 ms network alone).
+If that changes: read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
 
-**No CDN for redirects (decided 9 Nov):** every redirect hits LB → API → Redis directly. Redis hit is ~1 ms, so a CDN saves only network distance, and it would cache the 302 → clicks stop reaching us → can't enforce expiry (`410`) or count clicks (Phase 2). Revisit only for global latency, with a short `max-age`.
+**No CDN for redirects (decided 9 Nov):** every redirect hits LB → API → Redis directly. Redis hit is ~1 ms, so a CDN saves only network distance, and it would cache the 302 → clicks stop reaching us → can't enforce expiry (`410`) or count clicks (Phase 2). Matches the NFR: same-continent only, so the network hop already fits in 100 ms. Revisit only if global latency becomes a requirement, with a short `max-age`.
 
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
