@@ -188,7 +188,11 @@ Interview line: "~110 GB of data over 5 years, provision ~300 GB per node — on
 ![Phase 2 read flow](phase-2-read-flow.png)
 
 *9 Nov 2026.* Black = cache hit · red = cache miss → read replica → app fills cache · red dashed = replica miss → primary fallback · green = Kafka → analytics workers → batched upsert into primary · WAL: sync to standby, async to read replicas.
-- [ ] Write flow (create / signup / delete) diagram.
+### Write flow (create a link)
+![Phase 2 write flow](phase-2-write-flow.png)
+
+*9 Nov 2026.* 1–2 client → LB → app · 3 `INSERT … RETURNING id` on the **primary only** · 4 id back → `encode(id)` · 5–6 write-through `SET code → long_url` in cache · 7–8 `201` back to client. WAL then copies the row to standby (sync) and replicas (async).
+Delete uses the same path: 3 `UPDATE … SET deleted_at = now()` on primary · 5 **evict** (`DEL code`) instead of SET.
 
 ## 7. Deep dives
 
@@ -221,7 +225,7 @@ Interview line: "~110 GB of data over 5 years, provision ~300 GB per node — on
 - [ ] Rate limiter behind the `429`s → covered properly in D5 (token bucket in Redis, per IP / per user)
 - [x] Path naming → `/api/v1/urls` everywhere (Phase 1 updated 9 Nov)
 - [x] Back-of-the-envelope: traffic + storage for all tables (9 Nov)
-- [ ] Diagram: read flow ✅ (9 Nov) · write flow still TODO
+- [x] Diagrams: read flow + write flow (9 Nov)
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
 - [ ] Why does analytics turn reads into writes, and why not write to Postgres in the redirect?
