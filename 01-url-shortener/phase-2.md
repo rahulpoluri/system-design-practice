@@ -31,7 +31,7 @@ Builds on [Phase 1](phase-1.md). Only what changes or is added is written here.
 | Analytics views | 100k | ~0.04 |
 | Click events (= redirects) | 10M (peak 10×) | ≈ 39 / s peak |
 
-Totals (peak): writes (1M × 3 + 100k × 3) / 2.59M s ≈ **1.3 / s** · reads (10M × 10 + 4 × 100k × 10) / 2.59M s ≈ **40 / s**.
+Totals (peak): writes = creates 1M × 3 + (signup 10k + delete 10k) × 3 → 3.06M / 2.59M s ≈ **1.2 / s** · reads = redirects 10M × 10 + (login + list + analytics = 3 × 100k) × 10 → 103M / 2.59M s ≈ **40 / s**.
 
 → Everything new is negligible next to redirects. The only real new load is **click events = every redirect becomes a write** (see deep dives).
 Users over 5 years: 10k × 12 × 5 = **600k**. Only 10k signups vs 1M creates/month → most links are anonymous.
