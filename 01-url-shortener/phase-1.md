@@ -94,7 +94,7 @@ ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
 ![URL shortener HLD](diagram.png)
 
 
-Client → (CDN) → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
+Client → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
 ## 7. Deep dives
 
@@ -169,13 +169,15 @@ Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
 | Postgres PK lookup (index in RAM) | 2–10 ms |
 
 Cache hit ≈ 25–55 ms · miss ≈ 30–65 ms → fits. Breaks for other continents (Mumbai → Frankfurt ≈ 150 ms network alone).
-Fixes: CDN caches the redirect response at the edge (catch: first click on a new link still slow) · read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
+Fix: read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
+
+**No CDN for redirects (decided 9 Nov):** every redirect hits LB → API → Redis directly. Redis hit is ~1 ms, so a CDN saves only network distance, and it would cache the 302 → clicks stop reaching us → can't enforce expiry (`410`) or count clicks (Phase 2). Revisit only for global latency, with a short `max-age`.
 
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
 
 ## 9. Doc fixes (what's wrong or missing in this file)
-- [ ] CDN vs 302 conflict: section 3 says every click reaches us, section 8 says CDN caches the redirect — decide (no CDN for redirects, or short `max-age`).
+- [x] CDN vs 302 conflict → resolved 9 Nov: no CDN for redirects (see section 8).
 - [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
@@ -185,7 +187,7 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 - [ ] Why counter + base-64 instead of hashing?
 - [ ] Why does `hash(key) % N` break when a cache node is added, and how do Redis Cluster slots fix it?
 - [ ] What is eventual consistency here, and why is it OK for a URL shortener? (replica lag → primary fallback)
-- [ ] Why 302 and not 301?
+- [ ] Why 302 and not 301? Why no CDN in front of redirects?
 - [ ] How does the cleanup job delete 60M-scale data without hurting the DB, and why an advisory lock?
 - [ ] How does failover work without split-brain? (Patroni + etcd)
 - [ ] Why only 99.99% if every layer is redundant? Where does the 52 min come from?
