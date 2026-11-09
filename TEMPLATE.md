@@ -24,5 +24,8 @@ The 2–3 parts that matter most for this problem
 ## 8. NFR walk-back
 Each non-functional requirement → the part of the design that meets it
 
-## 9. Trade-offs & open gaps
-What I chose and why · what's still missing
+## 9. Doc fixes
+What's wrong or missing in this file (checkboxes)
+
+## 10. Self-check
+Questions I must answer out loud without looking (tick when I can)

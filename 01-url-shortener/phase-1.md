@@ -93,7 +93,6 @@ ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
 
 ![URL shortener HLD](diagram.png)
 
-*Version: 6 Nov 2026 (afternoon, with cleanup cron + advisory lock). TODO: add `diagram.excalidraw` source.*
 
 Client → (CDN) → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
@@ -175,9 +174,19 @@ Fixes: CDN caches the redirect response at the edge (catch: first click on a new
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
 
-## 9. Open gaps
-- [ ] Explain eventual consistency in my own words.
-- [ ] Back-of-the-envelope calculators: practise.
-- [ ] Index-size estimate and `hash % N` reasoning were marked "??" — confirm I can explain both.
+## 9. Doc fixes (what's wrong or missing in this file)
 - [ ] CDN vs 302 conflict: section 3 says every click reaches us, section 8 says CDN caches the redirect — decide (no CDN for redirects, or short `max-age`).
 - [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
+
+## 10. Self-check (answer out loud without looking — tick when I can)
+- [ ] Why 5 characters? (do the 64⁴ vs 64⁵ maths from memory)
+- [ ] Peak writes/reads per second from 1M / 10M per month.
+- [ ] Why does the PK index fit in RAM? (60M × ~32 B)
+- [ ] Why counter + base-64 instead of hashing?
+- [ ] Why does `hash(key) % N` break when a cache node is added, and how do Redis Cluster slots fix it?
+- [ ] What is eventual consistency here, and why is it OK for a URL shortener? (replica lag → primary fallback)
+- [ ] Why 302 and not 301?
+- [ ] How does the cleanup job delete 60M-scale data without hurting the DB, and why an advisory lock?
+- [ ] How does failover work without split-brain? (Patroni + etcd)
+- [ ] Why only 99.99% if every layer is redundant? Where does the 52 min come from?
+- [ ] Walk the latency budget for a cache hit and a miss.
