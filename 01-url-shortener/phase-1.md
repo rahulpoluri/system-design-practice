@@ -89,7 +89,17 @@ ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
 | PK index | 60M × ~32 B | ≈ 1.9 GB → fits in RAM |
 
 **Why ~32 B per index entry** (Postgres B-tree): key `id` 8 B + index tuple header 8 B (6 B pointer to the row on disk + 2 B flags) + 4 B slot pointer in the page = **20 B**. Pages are only ~90% full, plus page headers and upper tree levels → round up to **~32 B** to be safe. (Rule of thumb: index entry ≈ key size + ~12–24 B overhead.)
-| Disk | data + index + WAL/bloat headroom | ~200 GB (Phase 3 → revisit / shard) |
+
+**Why ~200 GB disk** (say: "about 100 GB used, provision 200 for headroom"):
+| Step | Adds | Running total |
+|---|---|---|
+| Data + PK index | 62 GB + 2 GB | 64 GB |
+| Bloat — deleted rows stay as dead rows until VACUUM (nightly cleanup creates many) | ~20–30% | ~80 GB |
+| WAL — change log kept for crash recovery + replicas catching up (grows if a replica lags) | a few GB → tens of GB | ~100 GB used |
+| Headroom — never run a DB disk near full | keep ≤ 50% full → × 2 | **~200 GB** |
+
+Phase 3 (1B links/month) → this grows ~1000× → revisit / shard.
+| Disk | ~100 GB used × 2 (keep disk ≤ 50% full) — breakdown below | **~200 GB** provisioned |
 
 ## 6. High-level diagram
 
