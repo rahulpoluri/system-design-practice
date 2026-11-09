@@ -58,7 +58,9 @@
 
 ## 5. High-level diagram
 
-`diagram.png` — *TODO: export from Excalidraw (source → `diagram.excalidraw`).*
+![URL shortener HLD](diagram.png)
+
+*Version: 6 Nov 2026 (morning). TODO: replace with the later redraw (cleanup cron) + add `diagram.excalidraw` source.*
 
 Client → (CDN) → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
@@ -139,6 +141,7 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 - [ ] **AuthZ:** JWT = who you are, not what you can access → ownership check (`url.user_id == user.id`) else `403`.
 - [ ] **Rate limiter** design behind the `429`s (e.g. token bucket in Redis, per IP / per user).
 - [ ] Updated diagram (auth, queue, workers, cleanup job).
+- [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
 
 **Phase 3 (1B requests/month) — not started**
 - [ ] Re-do numbers · sharding · ID generation without one central counter (range allocation per server) · NoSQL option.
