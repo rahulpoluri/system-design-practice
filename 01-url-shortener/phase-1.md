@@ -11,7 +11,7 @@
 **Non-functional**
 - Scale: 1M writes/month (peak 3×) · 10M reads/month (peak 10×) · not evenly distributed
 - Availability 99.99%
-- Latency p99 < 100 ms for users on the same continent as the data centre (single region)
+- Latency p99 < 100 ms
 - Eventual consistency is acceptable
 
 **Out of scope (Phase 1)**
@@ -87,6 +87,8 @@ ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
 | Row size | id 8 B + long_url 1,024 B (conservative; avg URL ~100 B) + expires_at 8 B | ≈ 1,040 B |
 | Data | 60M × 1,040 B | ≈ 62 GB |
 | PK index | 60M × ~32 B | ≈ 1.9 GB → fits in RAM |
+
+**Why ~32 B per index entry** (Postgres B-tree): key `id` 8 B + index tuple header 8 B (6 B pointer to the row on disk + 2 B flags) + 4 B slot pointer in the page = **20 B**. Pages are only ~90% full, plus page headers and upper tree levels → round up to **~32 B** to be safe. (Rule of thumb: index entry ≈ key size + ~12–24 B overhead.)
 | Disk | data + index + WAL/bloat headroom | ~200 GB (Phase 3 → revisit / shard) |
 
 ## 6. High-level diagram
@@ -168,22 +170,22 @@ Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
 | Redis hit | ~1 ms |
 | Postgres PK lookup (index in RAM) | 2–10 ms |
 
-Cache hit ≈ 25–55 ms · miss ≈ 30–65 ms → fits the same-continent NFR. Other continents are out of scope for Phase 1 (Mumbai → Frankfurt ≈ 150 ms network alone).
-If that changes: read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
+Cache hit ≈ 25–55 ms · miss ≈ 30–65 ms → fits. Breaks for other continents (Mumbai → Frankfurt ≈ 150 ms network alone).
+Fix: read-only region in Asia (replica + Redis) — works *because* we accepted eventual consistency.
 
-**No CDN for redirects (decided 9 Nov):** every redirect hits LB → API → Redis directly. Redis hit is ~1 ms, so a CDN saves only network distance, and it would cache the 302 → clicks stop reaching us → can't enforce expiry (`410`) or count clicks (Phase 2). Matches the NFR: same-continent only, so the network hop already fits in 100 ms. Revisit only if global latency becomes a requirement, with a short `max-age`.
+**No CDN for redirects (decided 9 Nov):** every redirect hits LB → API → Redis directly. Redis hit is ~1 ms, so a CDN saves only network distance, and it would cache the 302 → clicks stop reaching us → can't enforce expiry (`410`) or count clicks (Phase 2). Revisit only for global latency, with a short `max-age`.
 
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
 
 ## 9. Doc fixes (what's wrong or missing in this file)
-- [x] CDN vs 302 conflict → resolved 9 Nov: no CDN for redirects (see section 8).
+
 - [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
 - [ ] Why 5 characters? (do the 64⁴ vs 64⁵ maths from memory)
 - [ ] Peak writes/reads per second from 1M / 10M per month.
-- [ ] Why does the PK index fit in RAM? (60M × ~32 B)
+- [ ] Why does the PK index fit in RAM? (60M × ~32 B — and where 32 B comes from)
 - [ ] Why counter + base-64 instead of hashing?
 - [ ] Why does `hash(key) % N` break when a cache node is added, and how do Redis Cluster slots fix it?
 - [ ] What is eventual consistency here, and why is it OK for a URL shortener? (replica lag → primary fallback)
