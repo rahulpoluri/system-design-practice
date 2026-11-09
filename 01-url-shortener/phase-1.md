@@ -17,19 +17,13 @@
 **Out of scope (Phase 1)**
 - Sign-in · analytics
 
-## 2. Back-of-the-envelope
+## 2. Back-of-the-envelope — traffic & scale
 | | Calculation | Result |
 |---|---|---|
 | Writes (peak) | 1M × 3 / 2,592,000 s | ≈ 1.2 / s |
 | Reads (peak) | 10M × 10 / 2,592,000 s | ≈ 39 / s |
 | Rows over 5 years | 1M × 12 × 5 | 60M |
 | Code length | 64⁴ = 16.7M < 60M · 64⁵ = 1.07B ≥ 60M | **5 chars** (counter starts at 64⁴ so every code is exactly 5) |
-| Row size | id 8 B + long_url 1,024 B (conservative; avg URL ~100 B) + expires_at 8 B | ≈ 1,040 B |
-| Data | 60M × 1,040 B | ≈ 62 GB |
-| PK index | 60M × ~32 B | ≈ 1.9 GB → fits in RAM |
-| Disk | data + index + WAL/bloat headroom | ~200 GB (Phase 3 → revisit / shard) |
-
-`short_code` is **not stored** — it is computed from `id` (encode) and back (decode).
 
 ## 3. API
 
@@ -43,7 +37,15 @@
 
 **Why Postgres:** access is pure key-value by PK, no joins · load is tiny (one primary handles it) · need an atomic counter (`BIGSERIAL`/`nextval()`) · mature replication + failover (WAL streaming, Patroni). NoSQL (DynamoDB/Cassandra) is the option at Phase 3 scale.
 
-## 5. High-level diagram
+## 5. Back-of-the-envelope — storage (from the data model)
+| | Calculation | Result |
+|---|---|---|
+| Row size | id 8 B + long_url 1,024 B (conservative; avg URL ~100 B) + expires_at 8 B | ≈ 1,040 B |
+| Data | 60M × 1,040 B | ≈ 62 GB |
+| PK index | 60M × ~32 B | ≈ 1.9 GB → fits in RAM |
+| Disk | data + index + WAL/bloat headroom | ~200 GB (Phase 3 → revisit / shard) |
+
+## 6. High-level diagram
 
 ![URL shortener HLD](diagram.png)
 
@@ -51,7 +53,7 @@
 
 Client → (CDN) → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
-## 6. Deep dives
+## 7. Deep dives
 
 ### Key generation — counter + base-64, not hashing
 Cutting any hash (MD5/SHA-256) to 5 chars causes collisions → needs check + retry. A DB counter converted to base-64 is unique by design.
@@ -104,7 +106,7 @@ Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
 - **DB:** 1 primary + 1 synchronous standby + async read replicas, WAL streaming. Patroni on each DB node + separate 3-node etcd (majority vote, leader lease) → prevents split-brain. Failover ≈ 10–30 s write pause.
   Sequence may skip values after failover → gaps OK, never duplicates.
 
-## 7. NFR walk-back
+## 8. NFR walk-back
 
 **Availability 99.99% (≈ 52 min/year)**
 - 1 year = 525,600 min × 0.0001 ≈ 52.6 min. Each extra 9 = 10× less downtime (99.9% ≈ 8.8 h · 99.999% ≈ 5 min).
@@ -129,7 +131,7 @@ Fixes: CDN caches the redirect response at the edge (catch: first click on a new
 **Eventual consistency**
 Read replicas may lag briefly. Redirect falls back to the primary on a miss → a just-created link never 404s because of lag.
 
-## 8. Open gaps
+## 9. Open gaps
 - [ ] Explain eventual consistency in my own words.
 - [ ] Back-of-the-envelope calculators: practise.
 - [ ] Index-size estimate and `hash % N` reasoning were marked "??" — confirm I can explain both.

@@ -1,10 +1,10 @@
 # <Design name>
 
 ## 1. Requirements
-**Functional** (by phase) · **Non-functional** (availability, latency, consistency)
+**Functional** (by phase) · **Non-functional** (scale, availability, latency, consistency) · **Out of scope**
 
-## 2. Back-of-the-envelope
-Throughput (avg/peak) · storage · key sizes · what fits in RAM
+## 2. Back-of-the-envelope — traffic & scale
+Throughput (avg/peak) · total records · key/ID size
 
 ## 3. API
 Endpoint · request · success code · failure codes
@@ -12,14 +12,17 @@ Endpoint · request · success code · failure codes
 ## 4. Data model
 Tables · keys · indexes · why this DB
 
-## 5. High-level diagram
+## 5. Back-of-the-envelope — storage
+Row size (from the data model) · total data · index size · what fits in RAM · disk
+
+## 6. High-level diagram
 `diagram.png` (source: `diagram.excalidraw`)
 
-## 6. Deep dives
+## 7. Deep dives
 The 2–3 parts that matter most for this problem
 
-## 7. NFR walk-back
+## 8. NFR walk-back
 Each non-functional requirement → the part of the design that meets it
 
-## 8. Trade-offs & open gaps
+## 9. Trade-offs & open gaps
 What I chose and why · what's still missing
