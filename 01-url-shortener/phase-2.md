@@ -22,16 +22,15 @@ Builds on [Phase 1](phase-1.md). Only what changes or is added is written here.
 - Unique visitors · referrer / device analytics · SSO · teams / sharing
 
 ## 2. Back-of-the-envelope — traffic & scale
-| Endpoint | Per month | Per second (avg) |
-|---|---|---|
-| Signups | 10k | ~0.004 |
-| Logins | 100k | ~0.04 |
-| Delete my URL | 10k | ~0.004 |
-| List my URLs | 100k | ~0.04 |
-| Analytics views | 100k | ~0.04 |
-| Click events (= redirects) | 10M (peak 10×) | ≈ 39 / s peak |
+```
+All the other endpoints have ≤ 100,000 requests / month
+Reads (login + list + analytics): 3 × 100,000 × 10 peak = 3,000,000
+Writes (signup + delete): 2 × 10,000 × 3 peak = 60,000
 
-Totals (peak): writes = creates 1M × 3 + (signup 10k + delete 10k) × 3 → 3.06M / 2.59M s ≈ **1.2 / s** · reads = redirects 10M × 10 + (login + list + analytics = 3 × 100k) × 10 → 103M / 2.59M s ≈ **40 / s**.
+Total writes => (1,000,000 × 3 + 60,000) / 2,592,000 = 3,060,000 / 2,592,000 ≈ 1.2 writes/s
+Total reads  => (10,000,000 × 10 + 3,000,000) / 2,592,000 = 103,000,000 / 2,592,000 ≈ 40 reads/s
+```
+⚠️ NEW: every redirect now also creates a click event → ~39 click writes/s at peak → goes to a QUEUE, not directly to the DB.
 
 → Everything new is negligible next to redirects. The only real new load is **click events = every redirect becomes a write** (see deep dives).
 Users over 5 years: 10k × 12 × 5 = **600k**. Only 10k signups vs 1M creates/month → most links are anonymous.
