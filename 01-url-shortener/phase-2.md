@@ -155,7 +155,11 @@ Rule: **index entry = key copy + ~24 B** (one index per PK / UNIQUE / indexed co
 Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — one Postgres primary still handles it."
 
 ## 6. High-level diagram
-- [ ] TODO: Phase 1 diagram + auth, click queue, analytics workers.
+### Read flow (redirect)
+![Phase 2 read flow](phase-2-read-flow.png)
+
+*9 Nov 2026.* Black = cache hit · red = cache miss → read replica → app fills cache · red dashed = replica miss → primary fallback · green = Kafka → analytics workers → batched upsert into primary.
+- [ ] Write flow (create / signup / delete) diagram.
 
 ## 7. Deep dives
 
@@ -188,7 +192,7 @@ Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — on
 - [ ] Rate limiter design behind the `429`s (e.g. token bucket in Redis, per IP / per user)
 - [ ] Path naming: Phase 1 uses `/api/v1/short-urls`, Phase 2 `/api/v1/urls` — pick one
 - [x] Back-of-the-envelope: traffic + storage for all tables (9 Nov)
-- [ ] Diagram
+- [ ] Diagram: read flow ✅ (9 Nov) · write flow still TODO
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
 - [ ] Why does analytics turn reads into writes, and why not write to Postgres in the redirect?
