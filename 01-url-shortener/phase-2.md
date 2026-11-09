@@ -202,7 +202,7 @@ Delete uses the same path: 3 `UPDATE … SET deleted_at = now()` on primary · 5
   `INSERT … ON CONFLICT (url_id, day, region) DO UPDATE SET clicks = url_clicks_daily.clicks + EXCLUDED.clicks`
 - Batching = few DB writes, and counts are a few seconds/minutes behind (accepted in NFRs).
 - No CDN in front of redirects (Phase 1 decision) → every click reaches us → nothing is invisible.
-- [ ] Region: from GeoIP lookup on the client IP.
+- Region: from GeoIP lookup on the client IP.
 - Queue = **Kafka**: durable log (clicks survive a worker crash), consumer group → workers scale by adding partitions, no LB needed (workers pull). Redis Streams = lighter alternative at this scale.
 
 ### Auth
@@ -216,18 +216,11 @@ Delete uses the same path: 3 `UPDATE … SET deleted_at = now()` on primary · 5
 ## 8. NFR walk-back
 - **Redirect latency:** queue publish is fire-and-forget (~1 ms) → p99 unchanged.
 - **Queue down:** redirect still works; clicks are lost or buffered locally. Analytics is less critical than redirects.
-- [ ] TODO: availability of auth (login down ≠ redirects down).
+- **Auth down:** redirects need no auth → unaffected. JWT is checked on each app server by signature (no DB / auth-service call), so existing logged-in users keep working; only new logins/signups fail.
+- Rate limiter behind the `429`s → designed in D5.
 
-## 9. Doc fixes (what's wrong or missing in this file)
-- [x] Signup endpoint (9 Nov) — own email/password; SSO out of scope
-- [x] DELETE endpoint (9 Nov)
-- [x] List my URLs — page/limit (9 Nov)
-- [ ] Rate limiter behind the `429`s → covered properly in D5 (token bucket in Redis, per IP / per user)
-- [x] Path naming → `/api/v1/urls` everywhere (Phase 1 updated 9 Nov)
-- [x] Back-of-the-envelope: traffic + storage for all tables (9 Nov)
-- [x] Diagrams: read flow + write flow (9 Nov)
 
-## 10. Self-check (answer out loud without looking — tick when I can)
+## 9. Self-check (answer out loud without looking — tick when I can)
 - [ ] Why does analytics turn reads into writes, and why not write to Postgres in the redirect?
 - [ ] Walk the click path: redirect → queue → worker → upsert. What does `ON CONFLICT` do?
 - [ ] What happens to redirects if the queue is down?
