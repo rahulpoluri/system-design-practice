@@ -158,7 +158,7 @@ Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — on
 ### Read flow (redirect)
 ![Phase 2 read flow](phase-2-read-flow.png)
 
-*9 Nov 2026.* Black = cache hit · red = cache miss → read replica → app fills cache · red dashed = replica miss → primary fallback · green = Kafka → analytics workers → batched upsert into primary.
+*9 Nov 2026.* Black = cache hit · red = cache miss → read replica → app fills cache · red dashed = replica miss → primary fallback · green = Kafka → analytics workers → batched upsert into primary · WAL: sync to standby, async to read replicas.
 - [ ] Write flow (create / signup / delete) diagram.
 
 ## 7. Deep dives
