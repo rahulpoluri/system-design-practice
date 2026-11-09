@@ -27,9 +27,33 @@
 
 ## 3. API
 
-**`GET /{short_code}`** → `302` temporary redirect + `Location: <long_url>` (no browser cache, so every click reaches us) · `404 {"detail": "Requested URL not found"}` · `410` expired · `500` · `503 {"detail": "Server unavailable"}`
+### Create a short URL
+`POST /api/v1/short-urls`
 
-**`POST /api/v1/short-urls`** body `{"long_url": "..."}` → `201 {"short_url": "..."}` + header `Location: /{code}` · `422` validation · `429 {"detail": "Too many requests"}` · `500` · `503`
+Request body:
+```json
+{"long_url": "https://example.com/some/very/long/path"}
+```
+
+| Status | When | Response |
+|---|---|---|
+| `201 Created` | link created | body `{"short_url": "https://sho.rt/BAAAA"}` + header `Location: /BAAAA` |
+| `422 Unprocessable Entity` | `long_url` missing or not a valid URL | `{"detail": "Invalid URL"}` |
+| `429 Too Many Requests` | client over its rate limit | `{"detail": "Too many requests"}` |
+| `500 Internal Server Error` | unexpected bug | `{"detail": "Internal error"}` |
+| `503 Service Unavailable` | DB primary down (e.g. during failover) | `{"detail": "Server unavailable"}` |
+
+### Redirect
+`GET /{short_code}` — no body
+
+| Status | When | Response |
+|---|---|---|
+| `302 Found` | code exists and not expired | header `Location: <long_url>` |
+| `404 Not Found` | code invalid or doesn't exist | `{"detail": "Requested URL not found"}` |
+| `410 Gone` | code existed but `expires_at` has passed | `{"detail": "Link expired"}` |
+| `500` / `503` | bug / backend down | as above |
+
+**Why 302 and not 301:** a 301 is cached by the browser forever, so repeat clicks never reach us — we lose control (can't expire the link) and later can't count clicks (Phase 2). A 302 sends every click back to us.
 
 ## 4. Data model — PostgreSQL
 
