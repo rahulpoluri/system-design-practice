@@ -22,8 +22,6 @@ Builds on [Phase 1](phase-1.md). Only what changes or is added is written here.
 - Unique visitors · referrer / device analytics · SSO · teams / sharing
 
 ## 2. Back-of-the-envelope — traffic & scale
-| | Calculation | Result |
-|---|---|---|
 | Endpoint | Per month | Per second (avg) |
 |---|---|---|
 | Signups | 10k | ~0.004 |
@@ -33,13 +31,23 @@ Builds on [Phase 1](phase-1.md). Only what changes or is added is written here.
 | Analytics views | 100k | ~0.04 |
 | Click events (= redirects) | 10M (peak 10×) | ≈ 39 / s peak |
 
+Totals (peak): writes (1M × 3 + 100k × 3) / 2.59M s ≈ **1.3 / s** · reads (10M × 10 + 4 × 100k × 10) / 2.59M s ≈ **40 / s**.
+
 → Everything new is negligible next to redirects. The only real new load is **click events = every redirect becomes a write** (see deep dives).
 Users over 5 years: 10k × 12 × 5 = **600k**. Only 10k signups vs 1M creates/month → most links are anonymous.
 
 ## 3. API
 
 ### Sign up
-- [ ] TODO (see doc fixes).
+`POST /api/v1/signup` — form body `{email, password}`
+
+| Status | When | Response |
+|---|---|---|
+| `201 Created` | user created | no body |
+| `409 Conflict` | email already registered (DB unique violation) | `{"detail": "Email already exists"}` |
+| `422` | missing field / not an email (Pydantic, before the DB) | FastAPI error |
+| `429` | too many signups from one IP | `{"detail": "Too many requests"}` |
+| `500` / `503` | as Phase 1 | |
 
 ### Sign in
 `POST /api/v1/login` — form body `{email, password}`
@@ -62,7 +70,7 @@ Users over 5 years: 10k × 12 × 5 = **600k**. Only 10k signups vs 1M creates/mo
 | Status | When | Response |
 |---|---|---|
 | `201 Created` | link created | `{"short_url": "..."}` + `Location` header |
-| `401` | token sent but invalid / expired | `{"detail": "Invalid token"}` |
+| `401` | token sent but invalid / expired | `{"detail": "Invalid or expired token"}` |
 | `422` | invalid URL or `expires_at` in the past | `{"detail": "..."}` |
 | `429` / `500` / `503` | as Phase 1 | |
 
@@ -95,8 +103,29 @@ Side effect: emits a click event to the queue (see deep dives).
 | `404` | code doesn't exist |
 | `500` / `503` | as Phase 1 |
 
-### List my URLs · Delete my URL
-- [ ] TODO (see doc fixes).
+### List my URLs
+`GET /api/v1/urls?page=1&limit=20` — header `Authorization: Bearer <jwt>`
+
+| Status | When | Response |
+|---|---|---|
+| `200 OK` | always for a valid user (empty list if none) | `{"items": [{"short_url", "long_url", "created_at", "expires_at"}], "page": 1, "total": 57}` |
+| `401` | no / invalid / expired token | `{"detail": "Invalid or expired token"}` |
+| `500` / `503` | as Phase 1 | |
+
+Query: `WHERE user_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 20 OFFSET …` — uses the `user_id` index. (Page/limit is fine at ~100s of links per user; cursor pagination only if lists get huge.)
+
+### Delete my URL
+`DELETE /api/v1/urls/{short_code}` — header `Authorization: Bearer <jwt>` · **owner only**
+
+| Status | When | Response |
+|---|---|---|
+| `200 OK` | owner deletes their link | `{"detail": "url <short_code> deleted"}` (`204` no body is also common) |
+| `401` | no / invalid / expired token | `{"detail": "Invalid or expired token"}` |
+| `403 Forbidden` | link belongs to someone else | `{"detail": "Link belongs to someone else"}` |
+| `404` | code doesn't exist — **also on a 2nd delete** (still idempotent: state doesn't change) | `{"detail": "link not found"}` |
+| `500` / `503` | as Phase 1 | |
+
+Behind it: `deleted_at = now()` on the primary → **evict the key from Redis**. Anonymous links (`user_id NULL`) can't be deleted — they just expire.
 
 ## 4. Data model — PostgreSQL
 
@@ -114,7 +143,7 @@ Side effect: emits a click event to the queue (see deep dives).
 | `id` | `BIGINT` | PK (`BIGSERIAL`) | unchanged — `short_code = encode(id)` |
 | `long_url` | `TEXT` | `NOT NULL`, ≤ 1,024 | unchanged |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL` | **new** — shown in analytics |
-| `expires_at` | `TIMESTAMPTZ` | `NOT NULL`, **indexed** | now user-chosen → see note below |
+| `expires_at` | `DATE` | `NOT NULL`, **indexed** | now user-chosen → see note below |
 | `deleted_at` | `TIMESTAMPTZ` | `NULL` | **new** — soft delete |
 | `user_id` | `BIGINT` | FK → `users.id`, `NULL`, **indexed** | **new** — `NULL` = anonymous; index for "list my URLs" |
 
@@ -125,7 +154,7 @@ Side effect: emits a click event to the queue (see deep dives).
 |---|---|---|---|
 | `url_id` | `BIGINT` | FK → `urls.id` | |
 | `day` | `DATE` | | |
-| `region` | `VARCHAR(8)` | | e.g. `EU`, `IN` |
+| `region` | `CHAR(4)` | | e.g. `EU`, `IN` |
 | `clicks` | `BIGINT` | `NOT NULL DEFAULT 0` | |
 
 Composite PK `(url_id, day, region)` — also the index for "clicks of this URL between dates".
@@ -139,20 +168,20 @@ Rule: **index entry = key copy + ~24 B** (one index per PK / UNIQUE / indexed co
 - Per user: 528 + 312 = 840 B → 840 × 600k ≈ **0.5 GB**
 
 **`urls`** — 1M × 12 × 5 = 60M rows
-- Row: id 8 + long_url 1,024 + created_at 8 + expires_at 8 + deleted_at 8 + user_id 8 = 1,064 B
-- Indexes: PK (8 + 24) + expires_at (8 + 24) + user_id (8 + 24) = 96 B
-- Per URL: 1,064 + 96 = 1,160 B → 1,160 × 60M ≈ **70 GB**
+- Row: id 8 + long_url 1,024 + created_at 8 + expires_at 4 (date) + deleted_at 8 + user_id 8 = 1,060 B
+- Indexes: PK (8 + 24) + user_id (8 + 24) + expires_at (4 + 24) = 92 B
+- Per URL: 1,060 + 92 = 1,152 B → 1,152 × 60M ≈ **69 GB**
 
 **`url_clicks_daily`** — worst case every click is a new (url, day, region) row: 10M × 12 × 5 = 600M rows
-- Row: url_id 8 + day 4 + region 8 + clicks 8 = 28 B
-- Index: composite PK (8 + 4 + 8 = 20) + 24 = 44 B
-- Per row: 28 + 44 = 72 B → 72 × 600M ≈ **43 GB** (real number lower: popular links share rows)
+- Row: url_id 8 + day 4 + region 4 + clicks 8 = 24 B
+- Index: composite PK (8 + 4 + 4 = 16) + 24 = 40 B
+- Per row: 24 + 40 = 64 B → 64 × 600M ≈ **38 GB** (real number lower: popular links share rows)
 
 **Disk** = ((data + indexes) × 1.3 bloat + WAL) × 2 headroom
-- Tables: 0.5 + 70 + 43 ≈ 114 GB
-- (114 × 1.3 ≈ 148 + WAL ~10) × 2 ≈ **~320 GB per DB node** (each replica holds a full copy)
+- Tables: 0.5 + 69 + 38 ≈ 108 GB
+- (108 × 1.3 ≈ 140 + WAL ~10) × 2 ≈ **~300 GB per DB node** (each replica holds a full copy)
 
-Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — one Postgres primary still handles it."
+Interview line: "~110 GB of data over 5 years, provision ~300 GB per node — one Postgres primary still handles it."
 
 ## 6. High-level diagram
 ### Read flow (redirect)
@@ -170,7 +199,7 @@ Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — on
 - Batching = few DB writes, and counts are a few seconds/minutes behind (accepted in NFRs).
 - No CDN in front of redirects (Phase 1 decision) → every click reaches us → nothing is invisible.
 - [ ] Region: from GeoIP lookup on the client IP.
-- [ ] Which queue? (Redis Streams / RabbitMQ / Kafka) and why.
+- Queue = **Kafka**: durable log (clicks survive a worker crash), consumer group → workers scale by adding partitions, no LB needed (workers pull). Redis Streams = lighter alternative at this scale.
 
 ### Auth
 - JWT = **who you are (authN)**, not **what you can access (authZ)**.
@@ -186,11 +215,11 @@ Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — on
 - [ ] TODO: availability of auth (login down ≠ redirects down).
 
 ## 9. Doc fixes (what's wrong or missing in this file)
-- [ ] **Signup** endpoint (or SSO instead?)
-- [ ] **`DELETE /api/v1/urls/{code}`** → status codes table (`204` / `401` / `403` / `404`)
-- [ ] **`GET /api/v1/urls`** → list my URLs, paginated (cursor or page/limit?)
-- [ ] Rate limiter design behind the `429`s (e.g. token bucket in Redis, per IP / per user)
-- [ ] Path naming: Phase 1 uses `/api/v1/short-urls`, Phase 2 `/api/v1/urls` — pick one
+- [x] Signup endpoint (9 Nov) — own email/password; SSO out of scope
+- [x] DELETE endpoint (9 Nov)
+- [x] List my URLs — page/limit (9 Nov)
+- [ ] Rate limiter behind the `429`s → covered properly in D5 (token bucket in Redis, per IP / per user)
+- [x] Path naming → `/api/v1/urls` everywhere (Phase 1 updated 9 Nov)
 - [x] Back-of-the-envelope: traffic + storage for all tables (9 Nov)
 - [ ] Diagram: read flow ✅ (9 Nov) · write flow still TODO
 
@@ -201,4 +230,5 @@ Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — on
 - [ ] AuthN vs authZ — what is IDOR, and why is it worse with sequential codes?
 - [ ] Why soft delete, and why must delete evict the cache?
 - [ ] Why does `expires_at` need an index now when Phase 1 didn't?
+- [ ] 409 vs 422 · 401 vs 403 — when each?
 - [ ] Why no CDN — and how does that help analytics?

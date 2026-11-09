@@ -28,7 +28,7 @@
 ## 3. API
 
 ### Create a short URL
-`POST /api/v1/short-urls`
+`POST /api/v1/urls`
 
 Request body:
 ```json
