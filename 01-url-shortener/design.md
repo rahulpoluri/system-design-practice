@@ -22,18 +22,18 @@
 | Reads (peak) | 10M × 10 / 2,592,000 s | ≈ 39 / s |
 | Rows over 5 years | 1M × 12 × 5 | 60M |
 | Code length | 64⁴ = 16.7M < 60M · 64⁵ = 1.07B ≥ 60M | **5 chars** (counter starts at 64⁴ so every code is exactly 5) |
-| Row size | id 8 B + long_url ~1,024 B + expires_at 8 B | ≈ 1,040 B |
+| Row size | id 8 B + long_url 1,024 B (conservative; avg URL ~100 B) + expires_at 8 B | ≈ 1,040 B |
 | Data | 60M × 1,040 B | ≈ 62 GB |
 | PK index | 60M × ~32 B | ≈ 1.9 GB → fits in RAM |
-| Disk | data + index + WAL/bloat headroom | ~200 GB |
+| Disk | data + index + WAL/bloat headroom | ~200 GB (Phase 3 → revisit / shard) |
 
 `short_code` is **not stored** — it is computed from `id` (encode) and back (decode).
 
 ## 3. API
 
-**`GET /{short_code}`** → `302` + `Location: <long_url>` · `404` not found · `410` expired/deleted · `500` · `503`
+**`GET /{short_code}`** → `302` temporary redirect + `Location: <long_url>` (no browser cache, so every click reaches us) · `404` not found · `410` expired/deleted · `500` · `503`
 
-**`POST /api/v1/urls`** body `{long_url, expires_at}` → `201 {short_url}` · `422` validation · `429` rate limited · `500` · `503`
+**`POST /api/v1/urls`** body `{long_url, expires_at}` → `201 {short_url}` + header `Location: /{code}` · `422` validation · `429` rate limited · `500` · `503`
 
 **`POST /api/v1/login`** form `{email, password}` → `200 {access_token: <jwt>, token_type: "bearer"}` · `401` wrong credentials · `422` · `429` · `500` · `503`
 
@@ -60,7 +60,7 @@
 
 ![URL shortener HLD](diagram.png)
 
-*Version: 6 Nov 2026 (morning). TODO: replace with the later redraw (cleanup cron) + add `diagram.excalidraw` source.*
+*Version: 6 Nov 2026 (afternoon, with cleanup cron + advisory lock). TODO: add `diagram.excalidraw` source.*
 
 Client → (CDN) → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
@@ -100,6 +100,16 @@ Caveat: sequential ids → guessable codes. Fix if needed: reversible scramble (
 Cache is stateful → route by key, not round-robin. `hash(key) % N` breaks when N changes (most keys move → miss storm on DB).
 → **Redis Cluster**: 16,384 hash slots, the client library routes each key; adding a node moves only some slots.
 Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
+
+### Cleanup job (expired links)
+- Nightly: delete where `expires_at < now()` (`expires_at` = created + 5 years).
+- Never one big `DELETE` → WAL storm, replica lag, locks, bloat.
+- Batches: one `DELETE` per 5k-id range → commit → sleep (~33k expire per night ≈ 7 queries).
+- Start from `SELECT min(id)`: ids are sequential and lifetime is fixed, so expired rows = lowest ids.
+- Better: partition by month → `DROP` the oldest partition.
+- Redis: TTL = `expires_at` · redirect checks `expires_at` → `410`.
+- One runner only: `pg_try_advisory_lock(42)` on all servers, or a K8s CronJob. Missing a night is OK (+ alert).
+- Advisory lock beats a `job_running` flag: no race, auto-released if the process crashes.
 
 ### High availability
 - **Load balancers:** active/passive pair sharing a virtual IP (VRRP heartbeat). Scale up → active-active + DNS round-robin.
