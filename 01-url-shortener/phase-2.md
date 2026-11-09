@@ -24,11 +24,17 @@ Builds on [Phase 1](phase-1.md). Only what changes or is added is written here.
 ## 2. Back-of-the-envelope — traffic & scale
 | | Calculation | Result |
 |---|---|---|
-| Click events (peak) | = redirect rate | ≈ 39 / s |
-| Login / signup | small vs redirects | negligible |
-| Analytics reads | dashboard views, rare | negligible |
+| Endpoint | Per month | Per second (avg) |
+|---|---|---|
+| Signups | 10k | ~0.004 |
+| Logins | 100k | ~0.04 |
+| Delete my URL | 10k | ~0.004 |
+| List my URLs | 100k | ~0.04 |
+| Analytics views | 100k | ~0.04 |
+| Click events (= redirects) | 10M (peak 10×) | ≈ 39 / s peak |
 
-- [ ] TODO: number of users (assumption needed).
+→ Everything new is negligible next to redirects. The only real new load is **click events = every redirect becomes a write** (see deep dives).
+Users over 5 years: 10k × 12 × 5 = **600k**. Only 10k signups vs 1M creates/month → most links are anonymous.
 
 ## 3. API
 
@@ -125,7 +131,28 @@ Side effect: emits a click event to the queue (see deep dives).
 Composite PK `(url_id, day, region)` — also the index for "clicks of this URL between dates".
 
 ## 5. Back-of-the-envelope — storage
-- [ ] TODO: `users` size · `url_clicks_daily` rows = (urls clicked per day × regions) × days kept · row size ~40 B.
+Rule: **index entry = key copy + ~24 B** (one index per PK / UNIQUE / indexed column, not per column).
+
+**`users`** — 600k rows
+- Row: id 8 + email 256 + password_hash 256 + joined_at 8 = 528 B
+- Indexes: PK (8 + 24) + UNIQUE email (256 + 24) = 312 B
+- Per user: 528 + 312 = 840 B → 840 × 600k ≈ **0.5 GB**
+
+**`urls`** — 1M × 12 × 5 = 60M rows
+- Row: id 8 + long_url 1,024 + created_at 8 + expires_at 8 + deleted_at 8 + user_id 8 = 1,064 B
+- Indexes: PK (8 + 24) + expires_at (8 + 24) + user_id (8 + 24) = 96 B
+- Per URL: 1,064 + 96 = 1,160 B → 1,160 × 60M ≈ **70 GB**
+
+**`url_clicks_daily`** — worst case every click is a new (url, day, region) row: 10M × 12 × 5 = 600M rows
+- Row: url_id 8 + day 4 + region 8 + clicks 8 = 28 B
+- Index: composite PK (8 + 4 + 8 = 20) + 24 = 44 B
+- Per row: 28 + 44 = 72 B → 72 × 600M ≈ **43 GB** (real number lower: popular links share rows)
+
+**Disk** = ((data + indexes) × 1.3 bloat + WAL) × 2 headroom
+- Tables: 0.5 + 70 + 43 ≈ 114 GB
+- (114 × 1.3 ≈ 148 + WAL ~10) × 2 ≈ **~320 GB per DB node** (each replica holds a full copy)
+
+Interview line: "~115 GB of data over 5 years, provision ~320 GB per node — one Postgres primary still handles it."
 
 ## 6. High-level diagram
 - [ ] TODO: Phase 1 diagram + auth, click queue, analytics workers.
@@ -160,7 +187,7 @@ Composite PK `(url_id, day, region)` — also the index for "clicks of this URL 
 - [ ] **`GET /api/v1/urls`** → list my URLs, paginated (cursor or page/limit?)
 - [ ] Rate limiter design behind the `429`s (e.g. token bucket in Redis, per IP / per user)
 - [ ] Path naming: Phase 1 uses `/api/v1/short-urls`, Phase 2 `/api/v1/urls` — pick one
-- [ ] Back-of-the-envelope: users count + `url_clicks_daily` storage
+- [x] Back-of-the-envelope: traffic + storage for all tables (9 Nov)
 - [ ] Diagram
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
