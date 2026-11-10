@@ -15,4 +15,4 @@ Method: design → explain back in my own words → timed re-run from a blank pa
 Status: ✅ can explain + recreate in 45 min · 🟡 partial · ⬜ not started
 
 ## Reference notes
-- [AWS basics — map](aws-basics.md) (services by category, security + monitoring, URL shortener on AWS)
+- AWS / Terraform / Kubernetes basics → moved to [cloud-practice](https://github.com/rahulpoluri/cloud-practice)
