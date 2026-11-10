@@ -39,7 +39,8 @@ Per row = 24 + 40 = 64B → 64 × 60,000,000,000 ≈ 3.8TB
 All tables ≈ 4.5TB
 Disk = (4,535 × 1.3 + 50) × 2 ≈ 12TB per DB node
 ```
-Interview line: "~4.5 TB over 5 years, ~12 TB per node — too big for one Postgres node, and clicks are 85% of it."
+Interview line: "~4.5 TB over 5 years, ~12 TB disk per node with headroom — fits one NVMe box, so scale vertically + replicas; split clicks (85%) into an analytics store for isolation; shard only when growth outruns one box."
+_(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the easiest limit.)_
 
 ## 7. Deep dives
 
@@ -47,9 +48,26 @@ Interview line: "~4.5 TB over 5 years, ~12 TB per node — too big for one Postg
 1. **Move clicks out of Postgres** → append-only analytics store (ClickHouse / Cassandra) + roll old days up into monthly totals → Postgres ≈ 690GB data → **~2TB per node**.
 2. **Then:** does `urls` need sharding? 2TB on one node is manageable, writes are 12/s, cache absorbs most of 3,870 reads/s → **not yet**, it's the next step as data grows.
 
+### Scaling each stop (10 Nov)
+**Nginx** — event-driven, fixed workers (≈1 per core): CPU rises with load, memory barely (few KB/conn). 4k req/s is light → run **2 for redundancy, not capacity**.
+- t2/t3 = **burstable** (baseline ~10% vCPU + credits → throttled under steady load). Steady load → **c/m family** (full CPU always).
+- **How to know:** load test (wrk/k6) 10+ min, ramp up; watch p99, errors, CPU, CPUCreditBalance. Capacity = just before the p99 knee. Size for ~50–60% CPU at peak.
+
+**App servers** — **stateless**, autoscaling group.
+- **Scale on load** (req/instance or CPU ~60%), **alert on p99 latency**, then find the bottleneck. URL shortener is I/O-bound → CPU can look fine while latency climbs. Slow DB + more app servers = worse.
+- Sizing: 1 box ≈ 1k req/s (from load test) → 4 + headroom = **min 6**. Scale-out takes minutes → keep the minimum high.
+
+**Cache (Redis)** — cache the **hot set**, not all data (80/20). 1 node = 100k+ ops/s; hot set ~tens of GB → **1 primary + 1 replica, LRU**. Shard (Redis Cluster) only when the hot set > one node's RAM.
+- Redis Cluster routing: `slot = CRC16(key) % 16384`, slots → nodes. **Client library** (redis-py `RedisCluster`) caches the slot map, goes straight to the node; stale → `MOVED`. Adding a node = move slots, keys never change slot. Avoids the `hash % N` remap problem (same idea as consistent hashing).
+
+**DB** — plain Postgres has **no built-in sharding** (psycopg = one server). If ever needed: app-level routing (DIY) · sharding layer (**Citus** / Vitess) · natively distributed (**DynamoDB / Cassandra**, partition key = short_code).
+- **What limits one node:** disk (easy, add drives) · **RAM** (hot indexes must fit; ~1–4TB slot cap) · **IOPS** (HDD ~150, SATA SSD ~50–100k, NVMe ~500k–1M+; raise via NVMe / RAID 10 / more RAM) · **ops** (restore/replica rebuild time).
+- **RAM = working set, not total data.** Index lookup gives the page; the row read is RAM (~0.1µs) or disk (~100µs, 1000×). Redis absorbs hot reads → DB RAM ≈ `short_code` index (600M × (5+24)B ≈ **17GB**) + buffer for misses / **cold cache after Redis restart** / writes → **~64GB, 128GB comfortable**.
+- **Conclusion:** 4.5TB on one NVMe box, 12 writes/s → **no shard. Vertical + read replicas** (failover in seconds, no multi-hour restore). Clicks → analytics store for **workload isolation**.
+
 ## Open (continue 10 Nov)
-- [ ] Shard key for `urls` if we do shard (id? hash? range?) · consistent hashing
+- [ ] Shard key for `urls` if we do shard — NOT needed at Phase 3 scale; still answer: risk of short_code? (id? hash? range?) · consistent hashing
 - [ ] ID generation without one central counter (range allocation per server)
-- [ ] Cache at 3,870 reads/s: how many Redis nodes, hit ratio
+- [x] Cache at 3,870 reads/s: 1 primary + replica, LRU on hot set (hit ratio TBD)
 - [ ] Multi-region?
 - [ ] Phase 3 diagram
