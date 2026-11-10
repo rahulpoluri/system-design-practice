@@ -42,6 +42,13 @@ Disk = (4,535 × 1.3 + 50) × 2 ≈ 12TB per DB node
 Interview line: "~4.5 TB over 5 years, ~12 TB disk per node with headroom — fits one NVMe box, so scale vertically + replicas; split clicks (85%) into an analytics store for isolation; shard only when growth outruns one box."
 _(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the easiest limit.)_
 
+## 6. High-level diagram
+### Read flow (redirect) + analytics
+![Phase 3 read flow](phase-3-read-flow.png)
+
+*10 Nov 2026.* Same as [Phase 2 read flow](phase-2-read-flow.png) plus: Nginx **active/passive** · app autoscaling (min 6) · Redis primary + replicas, failover via **Sentinel ×3** (one per Redis box) · analytics worker writes to **Cassandra** (RF=3), not Postgres · analytics endpoint (3-1) reads from Cassandra · Postgres: primary + sync standby + async read replicas, no shard.
+Known nits: replicas drawn chained (cache1→2→3) — normally both replicate from the primary · Nginx → app server 2 arrow missing.
+
 ## 7. Deep dives
 
 ### Shrink before you shard (9 Nov)
@@ -103,4 +110,4 @@ Interview line: *"I shard when storage, RAM or write load outgrow one node — n
 - [ ] ID generation without one central counter (range allocation per server)
 - [x] Cache at 3,870 reads/s: 1 primary + replica, LRU on hot set (hit ratio TBD)
 - [ ] Multi-region?
-- [ ] Phase 3 diagram
+- [x] Phase 3 diagram (10 Nov, read flow)
