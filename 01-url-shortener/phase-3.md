@@ -105,9 +105,17 @@ Known nits: replicas drawn chained (cache1→2→3) — normally both replicate 
 
 Interview line: *"I shard when storage, RAM or write load outgrow one node — not for reads. Key = hash(short_code) for even spread and single-shard redirects; 'list my URLs' gets a user_id-keyed lookup table; logical shards so growth is moving shards, not rehashing."*
 
+### ID generation (10 Nov)
+- **Phase 3 = keep the Postgres sequence** (`INSERT … RETURNING id` → encode). 12 writes/s on one primary, no shard → one central counter is fine.
+- **Problem: sequential codes are guessable (enumeration).** id 1,000,000 → `4c92`, next → `4c93`… Anyone can count up/down → scrape every link (private Doc links, invoices) + read our volume (links/day). Ownership check only guards analytics — **redirects are public by design**.
+- **Decision: Sqids** — encode the id with a **custom shuffled alphabet** (kept private) → consecutive ids give random-looking codes, still 1-to-1 and decodable, no extra DB lookup.
+  - Caveat: Sqids is **obfuscation, not security** (no secret salt; Sqids docs say don't use for sensitive data). If links must be truly unguessable → random 7–8 char codes + unique constraint, retry on collision.
+- **If sharded / multi-primary later:** no single sequence → **range allocation** (each app server takes a block of 1,000 ids from a small counter service, one DB hit per 1,000 links) or Snowflake-style ids (timestamp + machine + counter, no coordination, but longer codes).
+- Interview line: *"Postgres sequence for uniqueness, Sqids with a shuffled alphabet so codes aren't enumerable; random codes if links are sensitive; range allocation once sharded."*
+
 ## Open (continue 10 Nov)
 - [x] Shard key for `urls` if we do shard — hash(short_code); not needed at Phase 3 scale (see "When to shard") (id? hash? range?) · consistent hashing
-- [ ] ID generation without one central counter (range allocation per server)
+- [x] ID generation — sequence + Sqids; range allocation if sharded
 - [x] Cache at 3,870 reads/s: 1 primary + replica, LRU on hot set (hit ratio TBD)
-- [ ] Multi-region?
+- [ ] Multi-region? → parked to later list
 - [x] Phase 3 diagram (10 Nov, read flow)
