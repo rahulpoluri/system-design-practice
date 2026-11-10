@@ -6,10 +6,13 @@ Method: design → explain back in my own words → timed re-run from a blank pa
 
 | # | Design | Status | Last timed run |
 |---|--------|--------|----------------|
-| 01 | [URL shortener](01-url-shortener/README.md) | 🟡 Phase 1 done · Phase 2 partial · Phase 3 open | — |
+| 01 | [URL shortener](01-url-shortener/README.md) | 🟡 all 3 phases designed (10 Nov) · timed run not done yet | — |
 | 02 | Jira-like multi-tenant B2B SaaS | ⬜ next | — |
 | 03 | Web crawler at scale | ⬜ | — |
 | 04 | Notification / news feed | ⬜ | — |
 | 05 | Rate limiter + distributed KV store | ⬜ | — |
 
 Status: ✅ can explain + recreate in 45 min · 🟡 partial · ⬜ not started
+
+## Reference notes
+- [AWS basics — map](aws-basics.md) (services by category, security + monitoring, URL shortener on AWS)
