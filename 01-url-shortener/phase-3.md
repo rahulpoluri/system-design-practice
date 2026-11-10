@@ -10,7 +10,8 @@ Builds on [Phase 2](phase-2.md). Same 7 endpoints, 100× reads / 10× everything
 - 10,000,000 creates / month (peak 3×)
 - Signup 100,000 · Login 1,000,000 · Delete 100,000 · List 1,000,000 · Analytics 1,000,000 / month
 
-**Non-functional:** same as Phase 2.
+**Non-functional:** same as Phase 2, plus:
+- **Non-enumerable codes** — consecutive links must not get consecutive codes (no scraping by counting up/down, no leaking links/day). Codes stay short (5 chars). → met by Sqids-scrambled sequence (see "ID generation").
 
 ## 2. Back-of-the-envelope — traffic & scale
 ```
