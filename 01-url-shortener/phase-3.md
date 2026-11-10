@@ -65,8 +65,30 @@ _(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the e
 - **RAM = working set, not total data.** Index lookup gives the page; the row read is RAM (~0.1µs) or disk (~100µs, 1000×). Redis absorbs hot reads → DB RAM ≈ `short_code` index (600M × (5+24)B ≈ **17GB**) + buffer for misses / **cold cache after Redis restart** / writes → **~64GB, 128GB comfortable**.
 - **Conclusion:** 4.5TB on one NVMe box, 12 writes/s → **no shard. Vertical + read replicas** (failover in seconds, no multi-hour restore). Clicks → analytics store for **workload isolation**.
 
+### When to shard — and how (10 Nov)
+**Reasons to shard** (only when shrink + vertical + replicas run out):
+1. **Storage** — data (+ headroom) outgrows the biggest practical box.
+2. **RAM** — hot indexes no longer fit → reads hit disk, p99 jumps.
+3. **Write throughput** — one primary can't take the writes (replicas only scale *reads*).
+4. **Ops / blast radius** — restore or replica rebuild takes too long; one node down = everyone down.
+5. **Data locality / compliance** — e.g. EU users' data must stay in the EU.
+> Not a reason: high read traffic → cache + read replicas first.
+
+**How to handle it once shards exist:**
+1. **Pick the shard key from the main query.** Redirect = `WHERE short_code = ?` → **`hash(short_code)`** → every redirect hits exactly one shard, even spread.
+   - Risk: **range** sharding on sequential codes/IDs → all new writes land on the last shard (hot shard). Hash avoids it.
+   - Hot *key* (one viral link) → Redis absorbs it, not the shard.
+2. **Routing** — Citus / Vitess coordinator, or a distributed DB (DynamoDB / Cassandra, partition key = `short_code`). DIY app routing only if forced.
+3. **Cross-shard queries** — "list my URLs" (`WHERE user_id = ?`) now hits every shard (scatter-gather). Fix: a second table `user_urls` sharded by `user_id` (denormalised lookup), or accept scatter-gather for a rare endpoint.
+4. **IDs / uniqueness** — no single sequence across shards → hash of code, or range allocation per server (ties to the open ID item).
+5. **Resharding** — start with many **logical shards** (e.g. 256) on few physical nodes; grow by moving logical shards, never `hash % N` on physical nodes (= remap everything). Same idea as Redis slots.
+6. **Each shard = primary + replica**, otherwise sharding multiplies failure points.
+7. **Joins / transactions** — keep what's read together on the same shard (co-locate by key); avoid cross-shard transactions.
+
+Interview line: *"I shard when storage, RAM or write load outgrow one node — not for reads. Key = hash(short_code) for even spread and single-shard redirects; 'list my URLs' gets a user_id-keyed lookup table; logical shards so growth is moving shards, not rehashing."*
+
 ## Open (continue 10 Nov)
-- [ ] Shard key for `urls` if we do shard — NOT needed at Phase 3 scale; still answer: risk of short_code? (id? hash? range?) · consistent hashing
+- [x] Shard key for `urls` if we do shard — hash(short_code); not needed at Phase 3 scale (see "When to shard") (id? hash? range?) · consistent hashing
 - [ ] ID generation without one central counter (range allocation per server)
 - [x] Cache at 3,870 reads/s: 1 primary + replica, LRU on hot set (hit ratio TBD)
 - [ ] Multi-region?
