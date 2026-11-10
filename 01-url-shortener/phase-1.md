@@ -13,6 +13,7 @@
 - Availability 99.99%
 - Latency p99 < 100 ms
 - Eventual consistency is acceptable
+- **Non-enumerable codes** — consecutive links must not get consecutive codes (no scraping by counting up/down, no leaking links/day) *(added 10 Nov)*
 
 **Out of scope (Phase 1)**
 - Sign-in · analytics
@@ -23,7 +24,7 @@
 | Writes (peak) | 1M × 3 / 2,592,000 s | ≈ 1.2 / s |
 | Reads (peak) | 10M × 10 / 2,592,000 s | ≈ 39 / s |
 | Rows over 5 years | 1M × 12 × 5 | 60M |
-| Code length | 64⁴ = 16.7M < 60M · 64⁵ = 1.07B ≥ 60M | **5 chars** (counter starts at 64⁴ so every code is exactly 5) |
+| Code length | 64⁴ = 16.7M < 60M · 64⁵ = 1.07B ≥ 60M | **5 chars** (scramble + fixed 5-char encode → every code is exactly 5) |
 
 ## 3. API
 
@@ -71,8 +72,7 @@ CREATE TABLE urls (
     long_url   TEXT        NOT NULL CHECK (length(long_url) <= 1024),
     expires_at TIMESTAMPTZ NOT NULL
 );
--- start the counter at 64^4 so every code is exactly 5 chars
-ALTER SEQUENCE urls_id_seq RESTART WITH 16777216;
+-- no RESTART trick needed: the scramble + fixed 5-char encode makes every code 5 chars (10 Nov)
 ```
 
 **`short_code` is not stored** — it's computed from `id` (encode) and back (decode), so no extra column and no extra index.
@@ -114,15 +114,21 @@ Client → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redi
 Cutting any hash (MD5/SHA-256) to 5 chars causes collisions → needs check + retry. A DB counter converted to base-64 is unique by design.
 (Not the `base64` library: it encodes bytes, pads with `=`, and can't give exactly 5 chars.)
 
-```python
-A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-POS = {c: i for i, c in enumerate(A)}
+**Problem: sequential ids → guessable codes.** Plain encode gives codes in order → anyone counts up/down → scrapes every link (private Doc links, invoices) + reads our volume. Redirects are public, so no auth check helps.
+**Fix (10 Nov): scramble the id before encoding** — multiply by a secret odd number mod 64⁵, XOR a secret mask. 1-to-1 and reversible, codes look random, still exactly 5 chars.
 
-def encode(n: int) -> str:
-    if n == 0:
-        return A[0]
+```python
+A   = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+POS = {c: i for i, c in enumerate(A)}
+N   = 64**5                # 1,073,741,824 = 2^30 codes, all 5 chars
+MUL = 387_420_489          # secret, must be ODD → has an inverse mod 2^30
+INV = pow(MUL, -1, N)      # "undo" multiplier
+XOR = 0x2A5F3C1            # secret mask (< 2^30)
+
+def encode(i: int) -> str:             # i = id from the Postgres sequence (< N)
+    n = ((i * MUL) % N) ^ XOR          # scramble
     chars = []
-    while n:
+    for _ in range(5):                 # fixed 5 iterations → always 5 chars
         n, r = divmod(n, 64)
         chars.append(A[r])
     return "".join(reversed(chars))
@@ -130,10 +136,15 @@ def encode(n: int) -> str:
 def decode(s: str) -> int:
     n = 0
     for ch in s:
-        n = n * 64 + POS[ch]   # KeyError → 404
-    return n
+        n = n * 64 + POS[ch]           # KeyError → 404
+    return ((n ^ XOR) * INV) % N       # unscramble: undo XOR, then undo multiply
 ```
-Caveat: sequential ids → guessable codes. Fix if needed: reversible scramble (e.g. Sqids).
+Example (shuffled alphabet): `1 → wdA4f`, `2 → dHvyr`, `3 → ZI7mn`, `600,000,000 → wkaOz` — all decode back exactly.
+- **Why odd?** N = 2³⁰, so any odd number shares no factor with N → has an inverse → no two ids collide.
+- **Limit:** only valid while `id < 64⁵` (1.07B). Beyond → 6-char codes with new N/constants; length tells decode which rule to use, old links keep working.
+- **Why not Sqids?** Tried it: Sqids spends ~1 char on overhead → 600M ids need 6 chars. Scramble keeps 5.
+- **Caveat:** obfuscation, not security (constants could be reverse-engineered from many samples). Truly sensitive links → random 7–8 char codes + unique constraint + retry.
+- IDs are **never reused** (sequence only counts up, soft-deleted rows keep their id) — reuse would send old saved links to a stranger's URL.
 
 ### Request flow
 - **Create:** `INSERT … RETURNING id` → `encode(id)` → write-through to cache → return short URL
@@ -197,6 +208,7 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 - [ ] Peak writes/reads per second from 1M / 10M per month.
 - [ ] Why does the PK index fit in RAM? (60M × ~32 B — and where 32 B comes from)
 - [ ] Why counter + base-64 instead of hashing?
+- [ ] Why scramble before encoding? Why must the multiplier be odd? What happens after id 64⁵?
 - [ ] Why does `hash(key) % N` break when a cache node is added, and how do Redis Cluster slots fix it?
 - [ ] What is eventual consistency here, and why is it OK for a URL shortener? (replica lag → primary fallback)
 - [ ] Why 302 and not 301? Why no CDN in front of redirects?

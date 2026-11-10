@@ -10,8 +10,7 @@ Builds on [Phase 2](phase-2.md). Same 7 endpoints, 100× reads / 10× everything
 - 10,000,000 creates / month (peak 3×)
 - Signup 100,000 · Login 1,000,000 · Delete 100,000 · List 1,000,000 · Analytics 1,000,000 / month
 
-**Non-functional:** same as Phase 2, plus:
-- **Non-enumerable codes** — consecutive links must not get consecutive codes (no scraping by counting up/down, no leaking links/day). Codes stay short (5 chars). → met by Sqids-scrambled sequence (see "ID generation").
+**Non-functional:** same as Phase 2 (incl. non-enumerable codes — see [Phase 1](phase-1.md)).
 
 ## 2. Back-of-the-envelope — traffic & scale
 ```
@@ -107,9 +106,6 @@ Known nits: replicas drawn chained (cache1→2→3) — normally both replicate 
 Interview line: *"I shard when storage, RAM or write load outgrow one node — not for reads. Key = hash(short_code) for even spread and single-shard redirects; 'list my URLs' gets a user_id-keyed lookup table; logical shards so growth is moving shards, not rehashing."*
 
 ### ID generation (10 Nov)
-- **Phase 3 = keep the Postgres sequence** (`INSERT … RETURNING id` → encode). 12 writes/s on one primary, no shard → one central counter is fine.
-- **Problem: sequential codes are guessable (enumeration).** id 1,000,000 → `4c92`, next → `4c93`… Anyone can count up/down → scrape every link (private Doc links, invoices) + read our volume (links/day). Ownership check only guards analytics — **redirects are public by design**.
-- **Decision: Sqids** — encode the id with a **custom shuffled alphabet** (kept private) → consecutive ids give random-looking codes, still 1-to-1 and decodable, no extra DB lookup.
-  - Caveat: Sqids is **obfuscation, not security** (no secret salt; Sqids docs say don't use for sensitive data). If links must be truly unguessable → random 7–8 char codes + unique constraint, retry on collision.
+- **Phase 3 = keep the Postgres sequence + scramble** (see [Phase 1 key generation](phase-1.md)). 12 writes/s on one primary, no shard → one central counter is fine.
 - **If sharded / multi-primary later:** no single sequence → **range allocation** (each app server takes a block of 1,000 ids from a small counter service, one DB hit per 1,000 links) or Snowflake-style ids (timestamp + machine + counter, no coordination, but longer codes).
-- Interview line: *"Postgres sequence for uniqueness, Sqids with a shuffled alphabet so codes aren't enumerable; random codes if links are sensitive; range allocation once sharded."*
+- Interview line: *"Postgres sequence scrambled before encoding, so codes are 5 chars and not enumerable; range allocation once sharded."*
