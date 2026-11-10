@@ -60,6 +60,17 @@ _(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the e
 **Cache (Redis)** — cache the **hot set**, not all data (80/20). 1 node = 100k+ ops/s; hot set ~tens of GB → **1 primary + 1 replica, LRU**. Shard (Redis Cluster) only when the hot set > one node's RAM.
 - Redis Cluster routing: `slot = CRC16(key) % 16384`, slots → nodes. **Client library** (redis-py `RedisCluster`) caches the slot map, goes straight to the node; stale → `MOVED`. Adding a node = move slots, keys never change slot. Avoids the `hash % N` remap problem (same idea as consistent hashing).
 
+- **Replica vs shard:** cache 2 = **full copy** of cache 1 (replica, for failover) — NOT half the keys. Sharded = each node holds part of the slots, and then each shard needs its own replica (2 shards = 4 boxes).
+- **Who switches to the replica? Redis Sentinel** — separate small process (`redis-sentinel`), run **3** (odd → vote). Ping primary → 2 of 3 agree it's down → promote replica → app (redis-py via Sentinel) asks "who's primary?" and follows.
+  - Placement: 1 on each Redis box + 1 on a **stable third machine**. Not on app servers (autoscaling → voters disappear). Not all on Redis boxes (primary box dies → its Sentinel dies too).
+- **Rule: fits one node → Sentinel (primary + replicas). Doesn't fit → Redis Cluster (sharding + failover built in).** Never both. Managed: ElastiCache does failover behind a DNS endpoint. Postgres equivalent: **Patroni**.
+
+**Analytics store — Cassandra** (clicks, not URLs)
+- Fits: write-heavy, append-only, fixed query "clicks for MY url by day/region" → partition key `url_id`, clustering key `day` → one partition per query. ClickHouse instead if we need ad-hoc cross-link aggregations (Cassandra is bad at queries not starting from the partition key).
+- **Distributed by default:** no primary (peer-to-peer) · token ring = consistent hashing on partition key · RF=3 · tunable consistency (`ONE` / `QUORUM`) · add a node → auto-rebalance.
+- **How nodes talk:** **gossip** = membership only (every second, 1–3 random peers swap who's up / who owns which ranges). **Data** = client → any node becomes **coordinator** → hashes key → sends to the RF replicas directly (TCP) → waits for CL acks. Replica down → **hinted handoff**.
+- Interview line: *"Cassandra, RF=3, partitioned by url_id, writes at ONE — a lost click is acceptable."*
+
 **DB** — plain Postgres has **no built-in sharding** (psycopg = one server). If ever needed: app-level routing (DIY) · sharding layer (**Citus** / Vitess) · natively distributed (**DynamoDB / Cassandra**, partition key = short_code).
 - **What limits one node:** disk (easy, add drives) · **RAM** (hot indexes must fit; ~1–4TB slot cap) · **IOPS** (HDD ~150, SATA SSD ~50–100k, NVMe ~500k–1M+; raise via NVMe / RAID 10 / more RAM) · **ops** (restore/replica rebuild time).
 - **RAM = working set, not total data.** Index lookup gives the page; the row read is RAM (~0.1µs) or disk (~100µs, 1000×). Redis absorbs hot reads → DB RAM ≈ `short_code` index (600M × (5+24)B ≈ **17GB**) + buffer for misses / **cold cache after Redis restart** / writes → **~64GB, 128GB comfortable**.
