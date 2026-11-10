@@ -23,6 +23,10 @@ Total reads  => (1,000,000,000 × 10 + 30,000,000) / 2,592,000 = 10,030,000,000 
 ```
 Read-heavy ~300:1. Code length: 600M rows over 5 years → 64⁵ = 1.07B ≥ 600M → **still 5 chars** (tight; ~10 years → 6).
 
+## 4. Data model — changes vs Phase 2
+- `users`, `urls`: unchanged (Postgres). `short_code` still **not stored** — `decode(code) → id`, lookup by PK.
+- `url_clicks_daily` → **moved to Cassandra** (partition key `url_id`, clustering `(day, region)`). No FK to `urls.id` any more (no cross-DB FKs) → worker writes whatever url_id it gets; deleted links simply stop getting clicks.
+
 ## 5. Back-of-the-envelope — storage
 ```
 Rule: index entry = key copy + 24B (one per index, not per column)
@@ -46,7 +50,7 @@ _(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the e
 ### Read flow (redirect) + analytics
 ![Phase 3 read flow](phase-3-read-flow.png)
 
-*10 Nov 2026.* Same as [Phase 2 read flow](phase-2-read-flow.png) plus: Nginx **active/passive** · app autoscaling (min 6) · Redis primary + replicas, failover via **Sentinel ×3** (one per Redis box) · analytics worker writes to **Cassandra** (RF=3), not Postgres · analytics endpoint (3-1) reads from Cassandra · Postgres: primary + sync standby + async read replicas, no shard.
+*10 Nov 2026.* Same as [Phase 2 read flow](phase-2-read-flow.png) plus: Nginx **active/passive** · app autoscaling (min 6) · Redis **1 primary + 2 replicas** (full copies), failover via **Sentinel ×3** (one per Redis box) · analytics worker writes to **Cassandra** (RF=3), not Postgres · analytics endpoint (3-1) reads from Cassandra · Postgres: primary + sync standby + async read replicas, no shard.
 Known nits: replicas drawn chained (cache1→2→3) — normally both replicate from the primary · Nginx → app server 2 arrow missing.
 
 ## 7. Deep dives
@@ -64,12 +68,12 @@ Known nits: replicas drawn chained (cache1→2→3) — normally both replicate 
 - **Scale on load** (req/instance or CPU ~60%), **alert on p99 latency**, then find the bottleneck. URL shortener is I/O-bound → CPU can look fine while latency climbs. Slow DB + more app servers = worse.
 - Sizing: 1 box ≈ 1k req/s (from load test) → 4 + headroom = **min 6**. Scale-out takes minutes → keep the minimum high.
 
-**Cache (Redis)** — cache the **hot set**, not all data (80/20). 1 node = 100k+ ops/s; hot set ~tens of GB → **1 primary + 1 replica, LRU**. Shard (Redis Cluster) only when the hot set > one node's RAM.
+**Cache (Redis)** — cache the **hot set**, not all data (80/20). 1 node = 100k+ ops/s; hot set ~tens of GB → **1 primary + 2 replicas, LRU** (as in the diagram; 1 replica also fine). Shard (Redis Cluster) only when the hot set > one node's RAM.
 - Redis Cluster routing: `slot = CRC16(key) % 16384`, slots → nodes. **Client library** (redis-py `RedisCluster`) caches the slot map, goes straight to the node; stale → `MOVED`. Adding a node = move slots, keys never change slot. Avoids the `hash % N` remap problem (same idea as consistent hashing).
 
-- **Replica vs shard:** cache 2 = **full copy** of cache 1 (replica, for failover) — NOT half the keys. Sharded = each node holds part of the slots, and then each shard needs its own replica (2 shards = 4 boxes).
+- **Replica vs shard:** caches 2 and 3 = **full copies** of cache 1 (replica, for failover) — NOT half the keys. Sharded = each node holds part of the slots, and then each shard needs its own replica (2 shards = 4 boxes).
 - **Who switches to the replica? Redis Sentinel** — separate small process (`redis-sentinel`), run **3** (odd → vote). Ping primary → 2 of 3 agree it's down → promote replica → app (redis-py via Sentinel) asks "who's primary?" and follows.
-  - Placement: 1 on each Redis box + 1 on a **stable third machine**. Not on app servers (autoscaling → voters disappear). Not all on Redis boxes (primary box dies → its Sentinel dies too).
+  - Placement (our design): **1 on each of the 3 Redis boxes** → any one box dies, 2 voters remain. With only 2 Redis boxes → 3rd Sentinel on a **stable third machine**. Not on app servers (autoscaling → voters disappear). (With 2 boxes, putting 2 Sentinels on one box is the trap: that box dies → only 1 voter left, no majority.)
 - **Rule: fits one node → Sentinel (primary + replicas). Doesn't fit → Redis Cluster (sharding + failover built in).** Never both. Managed: ElastiCache does failover behind a DNS endpoint. Postgres equivalent: **Patroni**.
 
 **Analytics store — Cassandra** (clicks, not URLs)
@@ -78,9 +82,9 @@ Known nits: replicas drawn chained (cache1→2→3) — normally both replicate 
 - **How nodes talk:** **gossip** = membership only (every second, 1–3 random peers swap who's up / who owns which ranges). **Data** = client → any node becomes **coordinator** → hashes key → sends to the RF replicas directly (TCP) → waits for CL acks. Replica down → **hinted handoff**.
 - Interview line: *"Cassandra, RF=3, partitioned by url_id, writes at ONE — a lost click is acceptable."*
 
-**DB** — plain Postgres has **no built-in sharding** (psycopg = one server). If ever needed: app-level routing (DIY) · sharding layer (**Citus** / Vitess) · natively distributed (**DynamoDB / Cassandra**, partition key = short_code).
+**DB** — plain Postgres has **no built-in sharding** (psycopg = one server). If ever needed: app-level routing (DIY) · sharding layer (**Citus** / Vitess) · natively distributed (**DynamoDB / Cassandra**, partition key = `id`).
 - **What limits one node:** disk (easy, add drives) · **RAM** (hot indexes must fit; ~1–4TB slot cap) · **IOPS** (HDD ~150, SATA SSD ~50–100k, NVMe ~500k–1M+; raise via NVMe / RAID 10 / more RAM) · **ops** (restore/replica rebuild time).
-- **RAM = working set, not total data.** Index lookup gives the page; the row read is RAM (~0.1µs) or disk (~100µs, 1000×). Redis absorbs hot reads → DB RAM ≈ `short_code` index (600M × (5+24)B ≈ **17GB**) + buffer for misses / **cold cache after Redis restart** / writes → **~64GB, 128GB comfortable**.
+- **RAM = working set, not total data.** Index lookup gives the page; the row read is RAM (~0.1µs) or disk (~100µs, 1000×). Redis absorbs hot reads → DB RAM ≈ `id` PK index (`short_code` isn't stored — decode → id; 600M × (8+24)B ≈ **19GB**) + buffer for misses / **cold cache after Redis restart** / writes → **~64GB, 128GB comfortable**.
 - **Conclusion:** 4.5TB on one NVMe box, 12 writes/s → **no shard. Vertical + read replicas** (failover in seconds, no multi-hour restore). Clicks → analytics store for **workload isolation**.
 
 ### When to shard — and how (10 Nov)
@@ -93,17 +97,17 @@ Known nits: replicas drawn chained (cache1→2→3) — normally both replicate 
 > Not a reason: high read traffic → cache + read replicas first.
 
 **How to handle it once shards exist:**
-1. **Pick the shard key from the main query.** Redirect = `WHERE short_code = ?` → **`hash(short_code)`** → every redirect hits exactly one shard, even spread.
-   - Risk: **range** sharding on sequential codes/IDs → all new writes land on the last shard (hot shard). Hash avoids it.
+1. **Pick the shard key from the main query.** Redirect = `decode(code)` → `WHERE id = ?` → **`hash(id)`** → every redirect hits exactly one shard, even spread.
+   - Risk: **range** sharding on ids → ids are still sequential (only codes are scrambled) → all new writes land on the last shard (hot shard). Hash avoids it.
    - Hot *key* (one viral link) → Redis absorbs it, not the shard.
-2. **Routing** — Citus / Vitess coordinator, or a distributed DB (DynamoDB / Cassandra, partition key = `short_code`). DIY app routing only if forced.
+2. **Routing** — Citus / Vitess coordinator, or a distributed DB (DynamoDB / Cassandra, partition key = `id`). DIY app routing only if forced.
 3. **Cross-shard queries** — "list my URLs" (`WHERE user_id = ?`) now hits every shard (scatter-gather). Fix: a second table `user_urls` sharded by `user_id` (denormalised lookup), or accept scatter-gather for a rare endpoint.
-4. **IDs / uniqueness** — no single sequence across shards → hash of code, or range allocation per server (ties to the open ID item).
+4. **IDs / uniqueness** — no single sequence across shards → range allocation per server or Snowflake (see "ID generation" below).
 5. **Resharding** — start with many **logical shards** (e.g. 256) on few physical nodes; grow by moving logical shards, never `hash % N` on physical nodes (= remap everything). Same idea as Redis slots.
 6. **Each shard = primary + replica**, otherwise sharding multiplies failure points.
 7. **Joins / transactions** — keep what's read together on the same shard (co-locate by key); avoid cross-shard transactions.
 
-Interview line: *"I shard when storage, RAM or write load outgrow one node — not for reads. Key = hash(short_code) for even spread and single-shard redirects; 'list my URLs' gets a user_id-keyed lookup table; logical shards so growth is moving shards, not rehashing."*
+Interview line: *"I shard when storage, RAM or write load outgrow one node — not for reads. Key = hash(id) for even spread and single-shard redirects; 'list my URLs' gets a user_id-keyed lookup table; logical shards so growth is moving shards, not rehashing."*
 
 ### ID generation (10 Nov)
 - **Phase 3 = keep the Postgres sequence + scramble** (see [Phase 1 key generation](phase-1.md)). 12 writes/s on one primary, no shard → one central counter is fine.

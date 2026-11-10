@@ -38,7 +38,7 @@ Request body:
 
 | Status | When | Response |
 |---|---|---|
-| `201 Created` | link created | body `{"short_url": "https://sho.rt/BAAAA"}` + header `Location: /BAAAA` |
+| `201 Created` | link created | body `{"short_url": "https://sho.rt/VsmKI"}` + header `Location: /VsmKI` |
 | `422 Unprocessable Entity` | `long_url` missing or not a valid URL | `{"detail": "Invalid URL"}` |
 | `429 Too Many Requests` | client over its rate limit | `{"detail": "Too many requests"}` |
 | `500 Internal Server Error` | unexpected bug | `{"detail": "Internal error"}` |
@@ -79,7 +79,7 @@ CREATE TABLE urls (
 **Indexes:** only the PK. Redirect = PK lookup. Cleanup deletes by `id` range (lowest ids expire first), so no index on `expires_at` is needed.
 **Duplicates:** the same long URL submitted twice gets two codes — fine for Phase 1 (no dedup index on `long_url`).
 
-**Why Postgres:** access is pure key-value by PK, no joins · load is tiny (one primary handles it) · need an atomic counter (`BIGSERIAL`/`nextval()`) · mature replication + failover (WAL streaming, Patroni). NoSQL (DynamoDB/Cassandra) is the option at Phase 3 scale.
+**Why Postgres:** access is pure key-value by PK, no joins · load is tiny (one primary handles it) · need an atomic counter (`BIGSERIAL`/`nextval()`) · mature replication + failover (WAL streaming, Patroni). Still Postgres at Phase 3 (no shard — see Phase 3); NoSQL (Cassandra) only for the click analytics there.
 
 ## 5. Back-of-the-envelope — storage (from the data model)
 | | Calculation | Result |
@@ -98,15 +98,14 @@ CREATE TABLE urls (
 | WAL — change log kept for crash recovery + replicas catching up (grows if a replica lags) | a few GB → tens of GB | ~100 GB used |
 | Headroom — never run a DB disk near full | keep ≤ 50% full → × 2 | **~200 GB** |
 
-Phase 3 (1B links/month) → this grows ~1000× → revisit / shard.
-| Disk | ~100 GB used × 2 (keep disk ≤ 50% full) — breakdown below | **~200 GB** provisioned |
+Phase 3 (10× creates, 100× redirects) → `urls` grows ~10× (~690 GB data) → still one Postgres node; clicks move to Cassandra. See Phase 3.
 
 ## 6. High-level diagram
 
 ![URL shortener HLD](diagram.png)
 
 
-Client → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis Cluster → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
+Client → LB pair (VRRP) → stateless API servers (nginx round-robin) → Redis (primary + replica, Sentinel failover) → Postgres primary + sync standby + async read replicas (Patroni + 3-node etcd). Cleanup cron on API servers.
 
 ## 7. Deep dives
 
@@ -139,12 +138,12 @@ def decode(s: str) -> int:
         n = n * 64 + POS[ch]           # KeyError → 404
     return ((n ^ XOR) * INV) % N       # unscramble: undo XOR, then undo multiply
 ```
-Example (shuffled alphabet): `1 → wdA4f`, `2 → dHvyr`, `3 → ZI7mn`, `600,000,000 → wkaOz` — all decode back exactly.
+Example (this code, tested 10 Nov): `1 → VsmKI`, `2 → sitFT`, `3 → H40Aa`, `600,000,000 → V8QXB` — all decode back exactly. (Shuffling `A` as well adds a bit more obfuscation.)
 - **Why odd?** N = 2³⁰, so any odd number shares no factor with N → has an inverse → no two ids collide.
 - **Limit:** only valid while `id < 64⁵` (1.07B). Beyond → 6-char codes with new N/constants; length tells decode which rule to use, old links keep working.
 - **Why not Sqids?** Tried it: Sqids spends ~1 char on overhead → 600M ids need 6 chars. Scramble keeps 5.
 - **Caveat:** obfuscation, not security (constants could be reverse-engineered from many samples). Truly sensitive links → random 7–8 char codes + unique constraint + retry.
-- IDs are **never reused** (sequence only counts up, soft-deleted rows keep their id) — reuse would send old saved links to a stranger's URL.
+- IDs are **never reused** (sequence only counts up; deleted/expired ids are never handed out again) — reuse would send old saved links to a stranger's URL.
 
 ### Request flow
 - **Create:** `INSERT … RETURNING id` → `encode(id)` → write-through to cache → return short URL
@@ -152,8 +151,8 @@ Example (shuffled alphabet): `1 → wdA4f`, `2 → dHvyr`, `3 → ZI7mn`, `600,0
   (primary fallback = read-your-writes despite replication lag)
 
 ### Caching
-Cache is stateful → route by key, not round-robin. `hash(key) % N` breaks when N changes (most keys move → miss storm on DB).
-→ **Redis Cluster**: 16,384 hash slots, the client library routes each key; adding a node moves only some slots.
+Hot set is tiny (60M rows total, far less hot) → fits one Redis node → **1 primary + 1 replica, failover via Redis Sentinel** (rule from Phase 3: fits one node → Sentinel; doesn't fit → Cluster).
+If it ever outgrows one node: don't route with `hash(key) % N` (N changes → most keys move → miss storm on DB) → **Redis Cluster**: 16,384 hash slots, the client library routes each key; adding a node moves only some slots.
 Cache-aside: lazy refill on miss. A cache node down = misses, not data loss.
 
 ### Cleanup job (expired links)
@@ -202,6 +201,7 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 ## 9. Doc fixes (what's wrong or missing in this file)
 
 - [ ] Diagram: API servers draw arrows straight to the sync **standby** — writes should only hit the primary (standby takes over via Patroni).
+- [ ] Diagram: the 2 cache servers are unlabelled and both API servers write to both → label them **primary / replica**, add a replication arrow + Sentinel (10 Nov decision).
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
 - [ ] Why 5 characters? (do the 64⁴ vs 64⁵ maths from memory)
@@ -209,7 +209,7 @@ Read replicas may lag briefly. Redirect falls back to the primary on a miss → 
 - [ ] Why does the PK index fit in RAM? (60M × ~32 B — and where 32 B comes from)
 - [ ] Why counter + base-64 instead of hashing?
 - [ ] Why scramble before encoding? Why must the multiplier be odd? What happens after id 64⁵?
-- [ ] Why does `hash(key) % N` break when a cache node is added, and how do Redis Cluster slots fix it?
+- [ ] Why one Redis primary + replica (Sentinel) and not Redis Cluster here? Why does `hash(key) % N` break, and how do Cluster slots fix it?
 - [ ] What is eventual consistency here, and why is it OK for a URL shortener? (replica lag → primary fallback)
 - [ ] Why 302 and not 301? Why no CDN in front of redirects?
 - [ ] How does the cleanup job delete 60M-scale data without hurting the DB, and why an advisory lock?

@@ -142,7 +142,7 @@ Behind it: `deleted_at = now()` on the primary → **evict the key from Redis**.
 | `id` | `BIGINT` | PK (`BIGSERIAL`) | unchanged — `short_code = encode(id)` |
 | `long_url` | `TEXT` | `NOT NULL`, ≤ 1,024 | unchanged |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL` | **new** — shown in analytics |
-| `expires_at` | `DATE` | `NOT NULL`, **indexed** | now user-chosen → see note below |
+| `expires_at` | `DATE` | `NOT NULL`, **indexed** | now user-chosen → see note below. `DATE` (was `TIMESTAMPTZ` in Phase 1): users pick a day, not a second; 4 B smaller per row + index |
 | `deleted_at` | `TIMESTAMPTZ` | `NULL` | **new** — soft delete |
 | `user_id` | `BIGINT` | FK → `users.id`, `NULL`, **indexed** | **new** — `NULL` = anonymous; index for "list my URLs" |
 
@@ -206,7 +206,7 @@ Delete uses the same path: 3 `UPDATE … SET deleted_at = now()` on primary · 5
 
 ### Auth
 - JWT = **who you are (authN)**, not **what you can access (authZ)**.
-- Ownership check on every "my URL" endpoint: `url.user_id == current_user.id`, else `403`. Without it → IDOR: anyone can read anyone's analytics by guessing codes (codes are sequential!).
+- Ownership check on every "my URL" endpoint: `url.user_id == current_user.id`, else `403`. Without it → IDOR: anyone who has (or is sent) a code could read its analytics or delete it. Codes are scrambled since Phase 1, but they're *shared publicly by design* — knowing a code ≠ owning it.
 
 ### Delete
 - Soft delete (`deleted_at = now()`) → redirect returns `410`.
@@ -223,7 +223,7 @@ Delete uses the same path: 3 `UPDATE … SET deleted_at = now()` on primary · 5
 - [ ] Why does analytics turn reads into writes, and why not write to Postgres in the redirect?
 - [ ] Walk the click path: redirect → queue → worker → upsert. What does `ON CONFLICT` do?
 - [ ] What happens to redirects if the queue is down?
-- [ ] AuthN vs authZ — what is IDOR, and why is it worse with sequential codes?
+- [ ] AuthN vs authZ — what is IDOR, and why is the ownership check still needed even though codes are scrambled?
 - [ ] Why soft delete, and why must delete evict the cache?
 - [ ] Why does `expires_at` need an index now when Phase 1 didn't?
 - [ ] 409 vs 422 · 401 vs 403 — when each?
