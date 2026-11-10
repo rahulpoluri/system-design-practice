@@ -70,7 +70,7 @@ _(Corrected 10 Nov: 12TB = disk NEEDED per node, not a node limit. Disk is the e
 1. **Storage** — data (+ headroom) outgrows the biggest practical box.
 2. **RAM** — hot indexes no longer fit → reads hit disk, p99 jumps.
 3. **Write throughput** — one primary can't take the writes (replicas only scale *reads*).
-4. **Ops / blast radius** — restore or replica rebuild takes too long; one node down = everyone down.
+4. **Blast radius / recovery time** — replicas cover *hardware* failure (failover in seconds). They do NOT cover *logical* failures: a bad migration or `DELETE` without `WHERE` is replicated instantly → restore from backup (10TB = hours). Also after failover you have no spare until a new replica is copied (hours at 10TB). Sharding → a mistake hits 1/N users and each restore/rebuild is N× smaller. Weak reason at 4.5TB.
 5. **Data locality / compliance** — e.g. EU users' data must stay in the EU.
 > Not a reason: high read traffic → cache + read replicas first.
 
