@@ -57,7 +57,7 @@ content: VARCHAR: 1KB
 links_path: JSON: 32B
 
 composite index on tenet_id, ticket_id, timestamp  # comments of a ticket in order
-index on user_id
+composite index on tenet_id, user_id   # "all comments by user X" within a tenant
 # (plain tenet_id index dropped: covered by the composite's leftmost prefix)
 
 logs
