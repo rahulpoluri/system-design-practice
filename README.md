@@ -7,7 +7,7 @@ Method: design → explain back in my own words → timed re-run from a blank pa
 | # | Design | Status | Last timed run |
 |---|--------|--------|----------------|
 | 01 | [URL shortener](01-url-shortener/README.md) | 🟡 all 3 phases designed (10 Nov) · timed run not done yet | — |
-| 02 | Jira-like multi-tenant B2B SaaS | ⬜ next | — |
+| 02 | [Jira-like multi-tenant B2B SaaS](02-jira-saas/phase-1.md) | 🟡 session 1: requirements + traffic BoE (12 Nov) · diagram next | — |
 | 03 | Web crawler at scale | ⬜ | — |
 | 04 | Notification / news feed | ⬜ | — |
 | 05 | Rate limiter + distributed KV store | ⬜ | — |
