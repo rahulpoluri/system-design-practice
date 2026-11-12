@@ -2,7 +2,6 @@
 
 ## Schema (my draft, 12 Nov evening)
 ```
-
 tenet_table
 ------------
 tened_id: Integer: 8B
@@ -19,7 +18,7 @@ position: VARCHAR: 20B
 permissions_json: JSON : 1K
 group_id : INTEGER: 8B FK
 
-index on tenet_id
+index on tenet_id, group_id
 index on name
 
 groups
@@ -29,8 +28,7 @@ tenet_id INTEGER: 8B FK
 group_name: VARCHAR : 20B
 permissions_json: JSON : 1K
 
-index on tenet_id
-index on group_name 
+composite index on tenet_id, group_name
 
 tickets
 -------
@@ -58,9 +56,9 @@ timestamp: DATETIME: 8B
 content: VARCHAR: 1KB
 links_path: JSON: 32B
 
-index on tenet_id
-composite index on ticket_id, timestamp  # for getting comments in order
+composite index on tenet_id, ticket_id, timestamp  # comments of a ticket in order
 index on user_id
+# (plain tenet_id index dropped: covered by the composite's leftmost prefix)
 
 logs
 ----
@@ -70,22 +68,12 @@ ticket_id: INTEGER: 8B FK
 timestamp: DATETIME: 8B
 event: VARCHAR: 20B
 
-index on tenet_id
+index on tenet_id, timestamp
 index on ticket_id
 
 
 we will have multiple db with same structure if some one wants isolated
 db they get isolated db with different db name but same table structure
-
-
-
-
-
-
-
-
-
-
 ```
 
 ## Review — fixed in session
@@ -100,7 +88,7 @@ db they get isolated db with different db name but same table structure
 - [ ] `users.group_id` = one group per user → real life is many-to-many → `user_groups (user_id, group_id)` join table.
 - [ ] `parent_to` + `child_to` → only `parent_id` needed (children = `WHERE parent_id = X`).
 - [ ] tickets missing: `project_id` (+ projects table), `status`, `assignee_id`, `priority`.
-- [ ] Too many single-column indexes → keep only those a real query needs (each index slows every write). Drop plain `tenant_id` indexes where a composite starting with `tenant_id` exists.
+- [x] (12 Nov, 21:18) Indexes reworked to composites per query; spotted the redundant plain `tenant_id` index on comments myself. Was: too many single-column indexes → keep only those a real query needs (each index slows every write). Drop plain `tenant_id` indexes where a composite starting with `tenant_id` exists.
 - [ ] Typo: tenet → tenant.
 
 ## Concepts I mixed up
