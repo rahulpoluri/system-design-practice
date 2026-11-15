@@ -140,6 +140,44 @@ db they get isolated db with different db name but same table structure
 - [x] (12 Nov, 21:18) Indexes reworked to composites per query; spotted the redundant plain `tenant_id` index on comments myself. Was: too many single-column indexes → keep only those a real query needs (each index slows every write). Drop plain `tenant_id` indexes where a composite starting with `tenant_id` exists.
 - [ ] Typo: tenet → tenant.
 
+# Storage + RAM sizing (15 Nov)
+
+## Storage (5 years: 250M tickets · 3 comments/ticket · 10 state changes/ticket)
+Rule: row size + index entries (each index entry ≈ key + ~24 B) → × rows.
+
+| Table | Rows | Row + indexes | Total |
+|---|---|---|---|
+| tickets | 250M | 1,356 + 104 = 1,460 B | **~365 GB** |
+| comments | 750M | 1,096 + 120 = 1,216 B | **~910 GB** |
+| logs | 2.5B | 52 + 104 = 156 B | **~390 GB** |
+| users + groups + tenants | 2.4M | — | ~3 GB → ignore |
+
+- **Total ≈ 1.7 TB** → × 1.3 (bloat + WAL) → × 2 headroom ≈ **4.5 TB SSD per DB node**.
+- Comments dominate (1 KB text is conservative; real average is probably ~300 B).
+- Logs: tiny rows but 3 indexes → **indexes 2× the data**. Keep only indexes a real query uses; partition by month, old months → cold storage.
+- Interview: size only the BIG tables, say "users/tenants are tiny, ignore".
+- Still fits one Postgres primary → the hard part is TENANCY, not size.
+
+## RAM sizing — the rule
+**RAM = (indexes, or their HOT part if too big) + recent data pages + a little for WAL & connections → × 2.**
+
+- **Small DB** (indexes fit, e.g. URL shortener ~3 GB): put ALL indexes in RAM. Done.
+- **Big DB** (D2 indexes ≈ 375 GB): don't fit everything. Fit what is READ OFTEN = the **hot set / working set**.
+- RAM = speed, SSD = capacity. Page in RAM ≈ 0.1 ms · from SSD ≈ 1 ms+. Nobody puts all data in RAM.
+
+**What must be in RAM (D2 minimum):**
+| Part | Why | Size |
+|---|---|---|
+| Upper levels of every B-tree (root + inner nodes, ~1% of index) | every lookup walks through them | ~4 GB |
+| Hot set: last month's tickets + comments + logs + their index leaf pages (250M / 60 months ≈ 4M tickets/month) | where the 8k reads/s land | ~25 GB |
+| WAL buffers + connections (~10 MB each) + sort memory + OS | runs the server | ~3 GB |
+| **Absolute minimum** | below this hot pages evict each other → SSD reads → p99 breaks | **~32 GB** |
+| **Provision (× 2)** | growth + spikes | **64 GB** |
+
+**No info at all?** RAM ≈ 10% of total data (D2: ~170 GB) — safe, generous.
+
+**Say it:** *"SSD for everything, RAM for what's hot, × 2. Data is 1.7 TB, indexes ~375 GB, so neither fits in RAM. The working set is last month's tickets, about 30 GB, so minimum 32 and I'd provision 64."*
+
 ## Concepts I mixed up
 ### Composite index — not only "WHERE a = x AND b = y"
 My idea: a composite index is for `WHERE id = … AND name = …`. True, but that example is the one where it's useless — `id` is unique, `name` adds nothing.
