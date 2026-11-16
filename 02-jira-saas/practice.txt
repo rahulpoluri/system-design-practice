@@ -42,18 +42,34 @@ tenet_id: Integer: 8B PK
 tenet_name: VARCHAR: 20B
 is_shared: BOOL: 1B
 db_name: VARCHAR: 20B
+plan: VARCHAR: 10B                      # API: POST /tenants {plan}
+deleted_at: DATETIME: 8B                # API: DELETE /tenants/me → purge within 30 days
 
 users
 ----
 id: INTEGER: 8B PK
 tenet_id INTEGER: 8B FK
 name: VARCHAR : 20B
+email: VARCHAR: 50B                     # API: login + invite
 position: VARCHAR: 20B
 permissions_json: JSON : 1K
-group_id : INTEGER: 8B FK
+deleted_at: DATETIME: 8B                # API: DELETE /users = soft delete (keep authorship/audit)
+status: VARCHAR: 10B                    # invited / active / deactivated
+invite_token_hash: CHAR: 32B            # one-time invite link (store HASH, never the token)
+invite_expires_at: DATETIME: 8B         # 7 days
+(group_id removed → user_groups, a user can be in many groups)
 
-index on tenet_id, group_id
+unique index on tenet_id, email         # login lookup + "email exists" 409
 index on name
+
+user_groups
+-----------
+user_id: INTEGER: 8B FK
+group_id: INTEGER: 8B FK
+tenet_id: INTEGER: 8B FK
+
+PK (user_id, group_id)                  # groups of a user
+index on tenet_id, group_id             # members of a group (GET /users?group_id=)
 
 groups
 ------
@@ -64,20 +80,38 @@ permissions_json: JSON : 1K
 
 composite index on tenet_id, group_name
 
+projects
+--------
+id: INTEGER: 8B PK
+tenet_id: INTEGER: 8B FK
+key: VARCHAR: 10B                       # "PAY" → ticket keys PAY-123
+name: VARCHAR: 50B
+created_at: DATETIME: 8B
+
+unique index on tenet_id, key
+
 tickets
 -------
 id: INTEGER: 8B PK
 tenet_id INTEGER: 8B FK
+project_id: INTEGER: 8B FK
+key: VARCHAR: 12B                       # "PAY-123"
 author: INTEGER: 8B FK
+assignee_id: INTEGER: 8B FK
 title: VARCHAR : 256B
 type: VARCHAR: 20B
+status: VARCHAR: 20B
+priority: VARCHAR: 10B
 description: VARCHAR: 1KB
-parent_to: INTEGER: 8B
-child_to: INTEGER: 8B
+parent_id: INTEGER: 8B                  # replaces parent_to + child_to (children = WHERE parent_id = X)
+version: INTEGER: 4B                    # optimistic lock (If-Match) + cache CAS
 created_at: DATETIME: 8B
 updated_at: DATETIME: 8B
+deleted_at: DATETIME: 8B                # soft delete
 
-composite index on tenet_id, created_at
+composite index on tenet_id, project_id, created_at     # GET /tickets?project_id= (board, newest first)
+composite index on tenet_id, assignee_id, status        # GET /tickets?assignee_id=me&status=open
+index on parent_id                                      # children of a ticket
 index on author
 
 comments
@@ -89,6 +123,7 @@ user_id: INTEGER: 8B FK
 timestamp: DATETIME: 8B
 content: VARCHAR: 1KB
 links_path: JSON: 32B
+parent_comment_id: BIGINT: 8B
 
 composite index on tenet_id, ticket_id, timestamp  # for getting comments in order
 composite index on tenet_id, user_id
@@ -98,11 +133,29 @@ logs
 id: INTEGER: 8B PK
 tenet_id INTEGER: 8B FK
 ticket_id: INTEGER: 8B FK
+user_id: INTEGER: 8B FK                 # who changed it
 timestamp: DATETIME: 8B
 event: VARCHAR: 20B
+old_value: VARCHAR: 30B (avg)           # API: GET /tickets/{id}/logs {old, new}
+new_value: VARCHAR: 30B (avg)
 
 index on tenet_id, timestamp
 index on ticket_id
+
+attachments
+-----------
+id: INTEGER: 8B PK
+tenet_id: INTEGER: 8B FK
+ticket_id: INTEGER: 8B FK
+uploader_id: INTEGER: 8B FK
+filename: VARCHAR: 100B
+s3_key: VARCHAR: 100B
+size: BIGINT: 8B
+content_type: VARCHAR: 30B
+status: VARCHAR: 10B                    # pending / uploaded
+created_at: DATETIME: 8B
+
+composite index on tenet_id, ticket_id
 
 
 we will have multiple db with same structure if some one wants isolated
@@ -110,32 +163,285 @@ db they get isolated db with different db name but same table structure
 
 # db size ram and ssd space
 --------------------------------
-tenet_table - row size 49B , index=(8+24)B = 81B
+tenet_table - row size 67B , index=(8+24)B = 32B → 99B
 rows = 15,000
-total_size = 81B *15000 = 0.001215GB
+total_size = 99B *15000 = 0.0015GB
 
-users_table = row_size=1088, index=(8+24)+(16+24)+(20+24)=116
+users_table = row_size=1188, index=(8+24)+(58+24)+(20+24)=158
 rows = 2*10^6
-total_size = 2*10^6*(1088+116) = 2.4GB
+total_size = 2*10^6*(1188+158) = 2.7GB
 
-groups_table = row_size=1060, index=(28+24)=52
+user_groups = row_size=24, index=(16+24)+(16+24)=80
+rows = 2*10^6 users × ~2 groups = 4*10^6
+total_size = 4*10^6*(24+80) = 0.42GB
+
+groups_table = row_size=1060, index=(8+24)+(28+24)=84
 rows= 2*10^6/5(assuming roughly 5 users in each group)= 400000
 total_size = 400000*(1060+84)= 0.46GB
 
+projects = row_size=84, index=(8+24)+(18+24)=74
+rows = 15,000 tenants × ~10 projects = 150,000
+total_size = 150,000*(84+74) = 0.02GB
 
-# big three (assumptions: 3 comments/ticket, 10 state changes/ticket, 250M tickets in 5 yrs)
-tickets  = row 1356B + idx (PK 32 + tenant,created 40 + author 32 = 104B) = 1460B × 250M  ≈ 365 GB
-comments = row 1096B + idx (PK 32 + tenant,ticket,ts 48 + tenant,user 40 = 120B) = 1216B × 750M ≈ 910 GB
-logs     = row 52B   + idx (PK 32 + tenant,ts 40 + ticket 32 = 104B) = 156B × 2.5B  ≈ 390 GB
-users + groups + tenants ≈ 3 GB → ignore
 
-total ≈ 1.7 TB  → × 1.3 bloat + WAL → × 2 headroom ≈ 4.5 TB SSD per DB node
-SSD = total data → 1.7 TB × 1.3 × 2 ≈ 4.5 TB
+# big four (assumptions: 3 comments/ticket, 10 state changes/ticket, 1 attachment per 5 tickets, 250M tickets in 5 yrs)
+tickets     = row 1418B + idx (PK 32 + tenant,project,created 48 + tenant,assignee,status 60 + parent 32 + author 32 = 204B) = 1622B × 250M ≈ 405 GB
+comments    = row 1104B + idx (PK 32 + tenant,ticket,ts 48 + tenant,user 40 = 120B) = 1224B × 750M ≈ 918 GB
+logs        = row 120B  + idx (PK 32 + tenant,ts 40 + ticket 32 = 104B) = 224B × 2.5B  ≈ 560 GB
+attachments = row 288B  + idx (PK 32 + tenant,ticket 40 = 72B) = 360B × 50M ≈ 18 GB   (FILES in S3: 50M × ~500 KB ≈ 25 TB — not in the DB)
+users + user_groups + groups + projects + tenants ≈ 3.5 GB → ignore
+
+total ≈ 1.9 TB  → × 1.3 bloat + WAL → × 2 headroom ≈ 5 TB SSD per DB node
+SSD = total data → 1.9 TB × 1.3 × 2 ≈ 5 TB
 RAM = (indexes, or their hot part if too big) + recent pages + a bit for WAL/connections, × 2
-    → hot set (last month ≈ 4M tickets + comments + logs + index pages) ≈ 30 GB → min ~32 GB, provision 64 GB
-    (indexes ≈ 375 GB total — logs idx 2× its data — so they DON'T all fit; only their hot part)
+    → hot set (last month ≈ 4.2M tickets 6.8 GB + 12.5M comments 15.3 GB + 42M logs 9.3 GB) ≈ 32 GB
+      + B-tree upper levels ~4 GB + WAL/connections ~3 GB → min ~40 GB → × 2 ≈ 80 → provision 128 GB (64 = no headroom)
+    (indexes ≈ 405 GB total — logs idx ~2× its data — so they DON'T all fit; only their hot part)
 insights: comments dominate (1KB text, conservative — avg likely ~300B) · logs = most ROWS → partition by month, old → cold storage
+          · attachments: DB row is tiny, the bytes live in S3 (25 TB) → that's why files never go in Postgres
 
 
 # diagram
+done 
 
+
+# Api design
+-------------
+COMMON RULES (all endpoints except login)
+- prefix /api/v1 · header Authorization: Bearer <jwt>
+- tenant_id + user_id + role come FROM THE JWT — never in path/body (can't ask for another tenant's data)
+- every query adds WHERE tenant_id = <from jwt>
+- other tenant's object → 404 (not 403: don't reveal it exists)
+- lists: cursor pagination ?limit=50&cursor=<opaque> → {items, next_cursor}  (offset = slow on deep pages + skips rows on insert)
+- common errors: 401 no/expired token · 403 role not allowed · 404 not found · 422 validation · 429 rate limit (per tenant) · 500/503
+
+AUTH
+POST /auth/accept-invite    body {invite_token, password} → 200 {access_token, refresh_token} · 410 token expired/used
+POST /auth/login            body {email, password}
+  200 {access_token (jwt: user_id, tenant_id, role, exp 15 min), refresh_token}
+  401 wrong credentials · 429 too many attempts
+POST /auth/refresh          body {refresh_token} → 200 new access_token · 401 expired/revoked
+(enterprise tenants: SSO/SAML instead of password — mention only)
+
+TENANTS  (platform admin / signup flow — not normal users)
+POST   /tenants             body {name, plan, isolated: bool, admin_email}
+  201 {tenant_id}  — isolated=true → provision private DB bank first (async → 202 {status: provisioning})
+  409 name taken
+GET    /tenants/me          → 200 {tenant_id, name, plan}
+DELETE /tenants/me          (tenant admin) → 202 Accepted {deletion_due: +30 days}
+  async job: mark tenant deleted (logins blocked) → purge rows + S3 objects + search index + backups age out ≤30 days
+
+USERS
+POST   /users               (admin) body {email, name, position, group_ids[]}
+  201 {user_id} — invite email sent · 409 email exists in tenant · 403 not admin
+GET    /users?group_id=&cursor=   → 200 {items[{id,name,position}], next_cursor}
+GET    /users/{id}          → 200 {id, name, position, groups[]} · 404
+PATCH  /users/{id}          body {name?, position?} → 200
+DELETE /users/{id}          (admin) → 204 · soft delete (deactivated, keep for audit/ticket authorship)
+
+GROUPS
+POST   /groups              body {name, permissions{}} → 201 {group_id} · 409 name exists
+GET    /groups              → 200 {items[{id,name}]}
+POST   /groups/{id}/members body {user_id} → 204 · 404 user/group · 409 already member
+DELETE /groups/{id}/members/{user_id} → 204
+DELETE /groups/{id}         → 204 · 409 if group still has members (or move them)
+
+PROJECTS
+POST   /projects            body {key: "PAY", name} → 201 {project_id} · 409 key taken
+GET    /projects?cursor=    → 200 {items[{id,key,name}], next_cursor}
+
+TICKETS
+POST   /tickets             body {project_id, type, title, description, parent_id?, assignee_id?, priority?}
+  201 {id, key: "PAY-123", version: 1} + Location header · 422 bad type / parent in other project · 404 project
+GET    /tickets/{id}        → 200 {id, key, project_id, type, status, title, description, author, assignee,
+                                   priority, parent_id, version, created_at, updated_at}   [cache-aside]
+GET    /tickets?project_id=&status=&assignee_id=&type=&parent_id=&sort=-created_at&limit=50&cursor=
+  → 200 {items[{id,key,title,status,assignee,priority}], next_cursor}   [Postgres, (tenant_id, …) index]
+  parent_id=X → children of X (hierarchy)
+GET    /search?q=login crash&project_id=&cursor=
+  → 200 {items[...], next_cursor}   [Elasticsearch, always filtered by tenant_id; eventual — few s behind]
+PATCH  /tickets/{id}        header If-Match: <version>   body {status?, assignee_id?, title?, priority?}  (only changed fields)
+  200 {full ticket, version: n+1}   — partial UPDATE ... RETURNING * → cache CAS-SET → audit row same txn → events
+  409 version mismatch (someone else edited — reload) · 422 invalid status transition (e.g. done → todo not allowed)
+DELETE /tickets/{id}        → 204 · soft delete (deleted_at) — audit stays
+
+COMMENTS
+POST   /tickets/{id}/comments  body {content} → 201 {comment_id}   (@mentions → notifier queue)
+GET    /tickets/{id}/comments?cursor=  → 200 {items[{id,user,content,created_at}], next_cursor}  oldest first
+PATCH  /comments/{id}       body {content} → 200 · 403 not the author
+DELETE /comments/{id}       → 204 · 403 not author/admin
+
+ATTACHMENTS (client → S3 directly)
+POST   /tickets/{id}/attachments  body {filename, size, content_type}
+  201 {attachment_id, upload_url (pre-signed PUT, 5 min), expires_in: 300} — row = pending
+  413 too large · 415 type not allowed
+PUT    <upload_url>         client → S3 · 200
+POST   /attachments/{id}/complete → 200 {status: uploaded} · 409 object not in S3
+GET    /attachments/{id}    → 302 redirect to pre-signed GET url
+
+AUDIT LOG
+GET    /tickets/{id}/logs?cursor=  → 200 {items[{user, event, old, new, timestamp}], next_cursor}  — read-only (no POST/DELETE: written by the server inside the ticket transaction)
+
+
+
+
+# deep dives
+-------------
+
+## 1. Version number — WHY and HOW
+WHY (3 problems, one column):
+- Cache race: server A writes v7, server B writes v8 to the DB. Their cache SETs can arrive v8 then v7 → cache stuck on old v7.
+  The DB orders DB writes; NOTHING orders cache writes across servers. ("respond only after cache update" doesn't help — it orders one request, not two.)
+- Lost update: A opens ticket, B opens ticket, both save the whole form → second save silently wipes the first.
+- Instant read-your-writes: author must see own change right away without routing reads to the primary.
+Why not timestamps: clocks on app servers drift (clock skew) → "newer" timestamp can be the older write. DB version is ordered by the DB itself.
+
+HOW:
+- tickets.version INTEGER, starts at 1. Only on tables that are CACHED + UPDATED (tickets; later projects/users). Not on append-only tables (comments, logs).
+- Write = partial update, version bumped by the DB, full row returned:
+    UPDATE tickets SET status='done', version = version + 1
+    WHERE id = 42 AND tenant_id = 7 AND version = 7        -- If-Match: 7 from the client
+    RETURNING *;
+  0 rows → someone else changed it → 409 Conflict ("reload"). = OPTIMISTIC LOCKING (no lock held while the user edits).
+- Same transaction: INSERT audit row (old → new). Commit.
+- Cache: SET with compare-and-set (Redis Lua): write only if new version > cached version. Late v7 after v8 → rejected.
+- Response = the RETURNING row (version 8) → author sees it instantly, others read it from cache.
+- Two users change DIFFERENT fields at the same time: partial UPDATEs → Postgres row lock runs them one after another, both survive;
+  RETURNING gives the merged row, higher version wins in cache. (Danger only if the app does read → modify → write of the whole row.)
+
+Alternatives (say you know them):
+- A: DELETE cache key on write (no version needed; a delete can't write a wrong value) → but author may read a lagging replica
+     and re-cache the OLD row → route author's reads to the primary for ~1–2 s (store last_write_at in session). Default for simple systems.
+- Postgres xmin (hidden row version) → OK for "did it change?", not for "is it newer?" (wraps around).
+- CDC (Debezium): ONE reader follows the WAL in commit order and updates the cache, WAL position (LSN) = version. No race, more infra, ~100s ms lag.
+Names: eventual consistency for other users · read-your-writes for the author · compare-and-set on the cache · optimistic locking in the DB.
+Strong consistency (linearizability) = every read from the primary = no read scaling.
+
+## 2. Tenant routing
+- WHO checks the JWT: the app server itself, as a dependency that runs BEFORE every endpoint
+  (FastAPI Depends(get_current_tenant) / Django middleware):
+    1. verify JWT signature locally with the auth public key (RS256) + exp → invalid → 401. No call to an auth service per request.
+    2. read tenant_id, user_id, permissions from the claims.
+    3. tenant directory (in memory) → shared or private bank → pick that bank's connection pool (primary for writes, replica for reads).
+    4. pass tenant + db session into the endpoint → every query WHERE tenant_id = …
+- auth service only ISSUES tokens (login / accept-invite / refresh, holds the private key). Validation is stateless → scales with app servers.
+- alternative: API gateway validates JWT at the edge (Kong / AWS API Gateway) → app trusts a header. Fine, but app still needs tenant routing.
+- tenant_id comes from the JWT (signed at login) — never from the request path/body.
+- tenant directory (tenant_id → shared or private DB bank) lives once in the control plane, every app server holds it IN MEMORY
+  (15k tenants × ~100 B ≈ 1.5 MB) → 0 extra network hops. Refresh on change / short TTL.
+- every query: WHERE tenant_id = <jwt>. Cache keys prefixed: t:{tenant_id}:ticket:{id}. Search queries filtered by tenant_id.
+- other tenant's object → 404, not 403 (don't reveal it exists).
+
+## 3. Write path vs read path
+WRITE: client → LB → app → primary (UPDATE ticket + INSERT audit, ONE txn) → cache CAS-SET → publish event → 200
+READ:  app → cache hit? return : read REPLICA → cache SET with TTL → return.  Cache and DB never talk to each other.
+SEARCH: GET /search?q= → Elasticsearch (fed async by the event queue → indexer), always filtered by tenant_id, few s behind = OK.
+
+## 4. Audit log ≠ event queue
+- audit = legal record, must never be lost → INSERT in the SAME transaction as the change (sync, no extra hardware, cost = storage).
+- event queue = transport for side jobs (search indexer, notifier) → async; a lost message can be rebuilt from the DB.
+- open: today the app publishes twice (two queues) = dual write → better: ONE topic + 2 consumer groups, or outbox table
+  (write event row in the same txn, a relay publishes it) → event can't get lost if the app dies after commit.
+
+## 5. Attachments — client → S3 directly
+- never stream files through app servers (double bandwidth, worker blocked minutes, LB timeouts).
+- POST /tickets/42/attachments → app creates row (pending) + PRE-SIGNED PUT URL → client PUTs to S3 → POST /attachments/{id}/complete.
+- pre-signed URL = app signs locally (HMAC-SHA256 over method + bucket/key + expiry with its secret). No call to AWS, nothing registered.
+  S3 recomputes the signature from the X-Amz-* params; anything changed → 403. Can't do more than the signer's IAM allows.
+    s3.generate_presigned_url("put_object", Params={"Bucket": b, "Key": k}, ExpiresIn=300)
+- cleanup cron: pending > 24 h → HeadObject → exists: mark uploaded · missing: delete row. (or S3 ObjectCreated event → queue → worker)
+- S3 = replicated over ≥3 AZs. On-prem: MinIO / Ceph (erasure coding, ≥4 nodes), same S3 API → only endpoint_url changes.
+
+## 6. Pagination — cursor, not offset
+- OFFSET 10000 → Postgres reads and throws away 10,000 rows; new tickets inserted while paging → rows skipped/duplicated.
+- cursor = last seen (created_at, id): WHERE (created_at, id) < (:c, :id) ORDER BY created_at DESC, id DESC LIMIT 50 → uses the index, always fast.
+
+## 7. Onboarding + roles (admin = a GROUP, Jira-style)
+- POST /tenants {name, admin_email} → creates tenant + default groups (tenant-admins, members) + first user in tenant-admins.
+  isolated tenant → provision private DB bank first (202 provisioning).
+- admin invites: POST /users {email, group_ids} → user status=invited + invite_token_hash, email with link (expires 7 d).
+- user: POST /auth/accept-invite {token, password} (or SSO for enterprise) → status=active → JWT.
+- three levels: platform admin (us — tenants) · tenant admin (= member of tenant-admins group — users/groups) · member (group permissions per project).
+- WHY groups, not a role column: one permission model for everything, admins are just a group with admin permissions; easy to have several admins.
+- guard: can't remove the LAST member of tenant-admins (→ 409), else the tenant locks itself out.
+- permissions resolved at login from the user's groups → put into the JWT (fast, no DB per request) — change takes effect at token refresh (≤15 min);
+  for instant revoke (fired admin) → token denylist in Redis / short expiry.
+
+## 8. Deletes
+- tickets/users/comments: soft delete (deleted_at) → audit + authorship stay; queries add deleted_at IS NULL.
+- tenant: DELETE /tenants/me → 202, logins blocked, async purge job: rows (private bank = drop the DB) + S3 prefix + search index;
+  backups age out → all gone ≤ 30 days (NFR).
+
+
+# NFR walk-back
+-----------------
+(✅ = solved by the design · ⚠️ = OPEN, still to decide)
+
+1. "Eventual consistency" + "data integrity"  (these contradict as written)
+   ✅ split: STRONG for ticket writes, status changes, audit log (one primary, one transaction, optimistic lock)
+      · READ-YOUR-WRITES for the author (RETURNING row → cache CAS) · EVENTUAL for search, dashboards, notifications (async queue)
+   ⚠️ requirements text in phase 1 still says just "eventual consistency" → rewrite as this split (doc fix)
+
+2. Highly available
+   ✅ LB active/passive · app ×2 stateless (any server can serve any tenant) · Redis ×2 · DB primary + sync standby (auto failover, Patroni)
+      + 2 async read replicas per bank · S3 = 3 AZs · indexer ×2, notifier ×2 · cache down → reads fall back to replicas (slower, not down)
+   ✅ TARGET 99.99 % = ~52 min/year · ~4.3 min/month down allowed. What that FORCES:
+      - everything redundant + spread over ≥2–3 AZs (LB, app, Redis, DB standby, queue, ES, auth service) — no single box anywhere
+      - AUTOMATIC failover only (Patroni ~30 s, Sentinel) — a human paging in takes longer than the whole monthly budget
+      - zero-downtime deploys (rolling / blue-green) + backward-compatible DB migrations — a 5-min maintenance window = budget gone
+      - components are in SERIES (LB → app → DB): availabilities multiply → each critical part needs better than 99.99 %
+      - ✅ MULTI-REGION (decided 16 Nov): ACTIVE-PASSIVE, both regions in the EU (GDPR) — e.g. Frankfurt active, Paris/Ireland warm standby
+          · DB: async streaming replication cross-region (sync would add ~15–20 ms to EVERY write) → RPO = a few seconds of writes
+          · S3: cross-region replication · tenant directory + config replicated · Redis starts cold in region 2 (warms up, replicas absorb)
+          · Elasticsearch: replica cluster or rebuild from DB via the indexer
+          · failover: health checks → DNS switch (Route 53, TTL 60 s) + promote standby DB → ~5 min RTO. Rare (≤1/yr) → fits 52 min/YEAR.
+          · NOT active-active: two regions writing the same ticket = write conflicts → avoid. (Later option: tenant "home region"
+            = cells, each tenant lives in one region → smaller blast radius.)
+          · cost: region 2 runs at reduced size, scaled up on failover. Test failover regularly (game days).
+   ⚠️ not said: servers spread over ≥2 AZs · Redis failover (Sentinel) · queue HA (RabbitMQ quorum queues / managed SQS)
+      · Elasticsearch ≥3 nodes · single region → region outage = full outage (accept it, say so)
+   ✅ BACKUPS (added 16 Nov) — replicas/standby are NOT backups: a bad DELETE / broken migration replicates to them in ms.
+      · per DB bank: daily base backup + continuous WAL archiving (pgBackRest / RDS automated backups) → S3 in a SEPARATE account,
+        other region, write-once (object lock) → ransomware / bad admin can't delete them
+      · PITR: restore base backup + replay WAL up to 10:41:59, the second before the mistake
+      · retention 30 days (also gives the 30-day delete, see 5) · restore TESTED monthly (untested backup = no backup)
+      · attachments: S3 versioning + cross-region replication · Elasticsearch: no backup needed, rebuild from DB
+      · per-tenant restore (one tenant's bad import) = restore to a side DB, copy that tenant's rows back → hard, say it
+
+3. Data integrity (same state everywhere)
+   ✅ single primary per bank orders all writes · FKs · audit row in the SAME transaction · partial UPDATE (no lost update)
+      · version + If-Match → 409 · sync standby → failover loses no committed write (RPO = 0)
+   ⚠️ events published after commit can be lost if app dies → OUTBOX table (open from deep dive 4)
+
+4. Some customers need separate databases
+   ✅ tenant directory (is_shared, db_name) in memory on every app server → private bank, same schema, same code
+   ⚠️ schema migrations must run on EVERY bank (shared + N private) → migration runner per bank, backward-compatible changes
+   ⚠️ phase-1 doc fix: name them — 2 bank tenants by contract, everyone else shared
+
+5. Remove all tenant data within 30 days
+   ✅ DELETE /tenants/me → logins blocked → purge job: DB rows (private bank = drop DB) + S3 prefix + search index + cache keys
+   OUT OF SCOPE (decided 16 Nov): tenant data EXPORT + the deletion pipeline details (backups, legal holds).
+   one-liner if asked: "backups kept ≤ 30 days, or crypto-shredding — per-tenant encryption key, delete the key = backups unreadable;
+   audit-log legal retention I'd clarify with legal." 
+
+6. Scale (5 yrs: 15k tenants · 700k DAU · 8k reads/s · 400 writes/s · 250M tickets)
+   ✅ 400 writes/s → one primary per bank is plenty (Postgres ~1–5k writes/s) · 8k reads/s → Redis cache + 2 replicas
+      · 1.9 TB data → ~5 TB SSD per node · RAM 128 GB (hot month ~32 GB) · files 25 TB in S3, not the DB
+      · logs partitioned by month, old → cold storage · cursor pagination keeps deep lists fast
+   ⚠️ NOISY NEIGHBOUR: one 5,000-user tenant can slow the shared bank → per-tenant rate limit (429 is in the API, limiter not designed → D5)
+      · move very big tenants to their own bank (same routing)
+   ✅ LATENCY p99 < 100 ms for API calls, users in the same continent (EU region).
+      budget: network ~30 ms + app ~10 ms + cache hit ~1 ms (miss → replica ~10–20 ms) · writes: primary + sync standby same region (+1–2 ms) fits.
+      search (Elasticsearch) + attachment upload NOT in the 100 ms (say: search p99 < 300 ms).
+
+7. Login only + tenant isolation (from functional reqs)
+   ✅ JWT checked in every request by the app dependency · tenant_id only from JWT · WHERE tenant_id everywhere · cache keys + search filtered
+      by tenant · other tenant's object → 404
+   ⚠️ safety net if a developer forgets WHERE tenant_id → Postgres ROW-LEVEL SECURITY (SET app.tenant_id per connection)
+   ⚠️ GDPR: all data stays in the EU → not in the requirements yet (doc fix)
+
+OPEN LIST (short):
+- (done) 99.99 % · p99 < 100 ms EU · active-passive 2 EU regions              - outbox for events
+- multi-AZ / Redis / queue / ES HA said out loud  - migrations across banks
+- (done) backups + PITR · delete/export out of scope        - noisy neighbour (→ D5)
+- Row-Level Security                              - phase-1 doc fixes (consistency split, GDPR, 2 bank tenants)
