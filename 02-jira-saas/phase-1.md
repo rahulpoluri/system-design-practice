@@ -177,7 +177,14 @@ Assumptions (5 years): 250M tickets · 3 comments/ticket · 10 changes/ticket ·
 
 ## 6. High-level diagram
 
-- Overview (first draft): `overview-v1.png` · Write flow: `write-flow.png` · Read flow: `read-flow.png`
+### Overview (first draft — redraw open, see doc fixes)
+![D2 overview](overview-v1.png)
+
+### Write flow
+![D2 write flow](write-flow.png)
+
+### Read flow
+![D2 read flow](read-flow.png)
 
 Boxes: DNS · LB (active/passive) · app ×2+ (JWT dependency + in-memory tenant directory) · auth service (issues tokens only) · Redis ×2 ·
 event topic → indexer ×2 → Elasticsearch · notifier ×2 → SES / websocket · shared DB bank + private DB bank (primary / sync standby / 2 read replicas each) ·
