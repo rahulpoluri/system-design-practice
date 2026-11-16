@@ -36,6 +36,17 @@ Audit log ≠ event queue: audit = permanent legal record, must never be lost �
 - Names: eventual consistency for others · read-your-writes for the author · CAS on the cache. Strong consistency (linearizability) = everything from primary = no read scaling.
 - Bonus: the version column = **optimistic locking** (`UPDATE ... WHERE id=42 AND version=7`; 0 rows → someone else edited).
 
+### DECISION (16 Nov) — two consistent packages, don't mix them
+| | A: DELETE on write | B: SET with version (**chosen for tickets**) |
+|---|---|---|
+| Write | UPDATE → DELETE cache key | partial `UPDATE ... SET status=..., version=version+1 RETURNING *` → cache CAS-SET (only if version higher) |
+| Author sees own write | needs read-your-writes → author's reads go to **primary** ~1–2 s (else replica refills cache with old row) | instantly from cache, **no primary routing** |
+| Extra column | none | `version` on tickets only |
+| Two users edit different fields at once | partial UPDATEs → Postgres row lock orders them, both survive | same + `RETURNING *` gives the full merged row, higher version wins in cache |
+- Replica lag in B only matters on a cache miss after TTL → by then the replica caught up (TTL ≫ lag).
+- Never read-modify-write the whole row in the app → lost update. Partial UPDATE, or optimistic lock if a whole-row form is saved.
+- Other ways to version without a column: Postgres `xmin` (change detection only, wraps around) · CDC/Debezium (one ordered reader, WAL LSN = version, no app writes to cache).
+
 ## Attachments (S3 / MinIO)
 - Never stream files through app servers (double bandwidth, worker blocked for minutes, LB timeouts).
 - Endpoints:
