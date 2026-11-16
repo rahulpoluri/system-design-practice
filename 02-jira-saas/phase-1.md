@@ -177,9 +177,6 @@ Assumptions (5 years): 250M tickets · 3 comments/ticket · 10 changes/ticket ·
 
 ## 6. High-level diagram
 
-### Overview
-![D2 overview](overview.png)
-
 ### Write flow
 ![D2 write flow](write-flow.png)
 
@@ -291,7 +288,7 @@ Names: eventual consistency for others · read-your-writes for the author · com
 - [x] Consistency contradiction → split (strong / read-your-writes / eventual).
 - [x] GDPR EU-only added · 2 bank tenants named · out-of-scope list.
 - [x] Data-model gaps from 12 Nov: `user_groups`, `parent_id`, `project_id` / `status` / `assignee_id` / `priority`, typo tenet → tenant.
-- [ ] Redraw diagram: auth service, JWT dependency, private-bank arrows, one event topic, notifier → SES / websocket, second region.
+- [ ] Draw the overview diagram (unfinished draft removed 16 Nov): auth service, JWT dependency, private-bank arrows, one event topic, notifier → SES / websocket, second region.
 - [ ] Known gaps (fine to name in an interview): outbox · migrations across banks · Row-Level Security · noisy neighbour.
 
 ## 10. Self-check (answer out loud without looking — tick when I can)
