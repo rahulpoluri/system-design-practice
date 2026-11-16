@@ -177,8 +177,8 @@ Assumptions (5 years): 250M tickets · 3 comments/ticket · 10 changes/ticket ·
 
 ## 6. High-level diagram
 
-### Overview (first draft — redraw open, see doc fixes)
-![D2 overview](overview-v1.png)
+### Overview
+![D2 overview](overview.png)
 
 ### Write flow
 ![D2 write flow](write-flow.png)
