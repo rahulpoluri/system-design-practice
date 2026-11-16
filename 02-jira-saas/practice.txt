@@ -1,0 +1,141 @@
+# Functional requirements
+- different companies use it and they have to see just their data
+- we should be able to read tickets write tickets and edit tickets
+- create user profiles with multiple authorization levels
+- can be accessed only by login
+- each person has their tickets and state of each tickets
+- there are branching tickets with heirarchy with different types relating to each other and different projects 
+- it should have log trail for every state change
+- we should be able to search and filter results
+
+# non functional requirements
+- it can be eventual consistency
+- it should be highly available
+- data integrity is of utmost importance(should hold same state everywhere)
+- share infra with some customer needing seperated databases
+- remove all their data within 30 days
+- total 3*10^5 users and 10^5 active everyday
+- 50reads/day/user 5writes/day/user searches 5/day/user
+- current 50*10^6 tickets and 10^7 growing every year
+- each tenents  10-100 users avg tops 5000 users
+
+growth in 5 years
+-------------------
+- Tenants go from 2,000 -> 15,000
+- users 300,000 -> 2*10^6
+- dau  10^5 -> 7*10^5
+- tickets 50* 10^6 -> 250 *10^6
+
+
+# BOE for traffic
+reads = 7* 10^5 * 50 / 12 / 60 / 60 * 10(for spikes) ~ 8000 requests/sec
+writes = 7 * 10^5 * 5 /12/60/60 * 5(for spikes) ~ 400 requests/sec
+
+writes = WAL fsync + every index + locks → one primary; 
+reads = RAM + snapshots → scale out with replicas.
+
+# db design
+
+tenet_table
+------------
+tenet_id: Integer: 8B PK
+tenet_name: VARCHAR: 20B
+is_shared: BOOL: 1B
+db_name: VARCHAR: 20B
+
+users
+----
+id: INTEGER: 8B PK
+tenet_id INTEGER: 8B FK
+name: VARCHAR : 20B
+position: VARCHAR: 20B
+permissions_json: JSON : 1K
+group_id : INTEGER: 8B FK
+
+index on tenet_id, group_id
+index on name
+
+groups
+------
+id: INTEGER: 8B PK
+tenet_id INTEGER: 8B FK
+group_name: VARCHAR : 20B
+permissions_json: JSON : 1K
+
+composite index on tenet_id, group_name
+
+tickets
+-------
+id: INTEGER: 8B PK
+tenet_id INTEGER: 8B FK
+author: INTEGER: 8B FK
+title: VARCHAR : 256B
+type: VARCHAR: 20B
+description: VARCHAR: 1KB
+parent_to: INTEGER: 8B
+child_to: INTEGER: 8B
+created_at: DATETIME: 8B
+updated_at: DATETIME: 8B
+
+composite index on tenet_id, created_at
+index on author
+
+comments
+---------
+id: INTEGER: 8B PK
+tenet_id INTEGER: 8B FK
+ticket_id: INTEGER: 8B FK
+user_id: INTEGER: 8B FK
+timestamp: DATETIME: 8B
+content: VARCHAR: 1KB
+links_path: JSON: 32B
+
+composite index on tenet_id, ticket_id, timestamp  # for getting comments in order
+composite index on tenet_id, user_id
+
+logs
+----
+id: INTEGER: 8B PK
+tenet_id INTEGER: 8B FK
+ticket_id: INTEGER: 8B FK
+timestamp: DATETIME: 8B
+event: VARCHAR: 20B
+
+index on tenet_id, timestamp
+index on ticket_id
+
+
+we will have multiple db with same structure if some one wants isolated
+db they get isolated db with different db name but same table structure
+
+# db size ram and ssd space
+--------------------------------
+tenet_table - row size 49B , index=(8+24)B = 81B
+rows = 15,000
+total_size = 81B *15000 = 0.001215GB
+
+users_table = row_size=1088, index=(8+24)+(16+24)+(20+24)=116
+rows = 2*10^6
+total_size = 2*10^6*(1088+116) = 2.4GB
+
+groups_table = row_size=1060, index=(28+24)=52
+rows= 2*10^6/5(assuming roughly 5 users in each group)= 400000
+total_size = 400000*(1060+84)= 0.46GB
+
+
+# big three (assumptions: 3 comments/ticket, 10 state changes/ticket, 250M tickets in 5 yrs)
+tickets  = row 1356B + idx (PK 32 + tenant,created 40 + author 32 = 104B) = 1460B × 250M  ≈ 365 GB
+comments = row 1096B + idx (PK 32 + tenant,ticket,ts 48 + tenant,user 40 = 120B) = 1216B × 750M ≈ 910 GB
+logs     = row 52B   + idx (PK 32 + tenant,ts 40 + ticket 32 = 104B) = 156B × 2.5B  ≈ 390 GB
+users + groups + tenants ≈ 3 GB → ignore
+
+total ≈ 1.7 TB  → × 1.3 bloat + WAL → × 2 headroom ≈ 4.5 TB SSD per DB node
+SSD = total data → 1.7 TB × 1.3 × 2 ≈ 4.5 TB
+RAM = (indexes, or their hot part if too big) + recent pages + a bit for WAL/connections, × 2
+    → hot set (last month ≈ 4M tickets + comments + logs + index pages) ≈ 30 GB → min ~32 GB, provision 64 GB
+    (indexes ≈ 375 GB total — logs idx 2× its data — so they DON'T all fit; only their hot part)
+insights: comments dominate (1KB text, conservative — avg likely ~300B) · logs = most ROWS → partition by month, old → cold storage
+
+
+# diagram
+

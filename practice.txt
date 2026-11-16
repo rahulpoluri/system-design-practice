@@ -1,0 +1,118 @@
+Functional requirements
+------------------------
+the user should be able to shorten the url
+when user clicks short url it should be diverted to original
+fixed timeline for 5 years
+no login
+
+
+# non functional requirements
+------------------------------
+it should be highly available 99.99
+system should last atleast 5 years without upgrade
+eventual consistency is fine
+link should be retrieved in less than 100 ms in same continent
+
+# usage numbers projected
+---------------------------
+100000 redirects/day
+50000 new links/day
+load is not evenly distributed
+
+
+# throughput estimation
+-----------------------
+reads/sec = 10^5/24/60/60 * 10(for peak load) = 11.6 reads/sec
+writes/sec = 50000/24/60/60 * 5(for peak load)= 2.89 writes/sec
+
+
+# database design
+------------------
+DB choice : since its a simple table with no complex joins and also fixed data strcture also relatively low requests volume
+any db will work, we will take here postgres.
+
+for short url we will take a incrimenting number which is encoded and scrambled to not have any collissions with
+limited size and since it is incrimental we can use ID pk directly for it.
+
+links table
+-----
+id | BIGINT | 8B PK
+long_url | VARCHAR | 1KB
+expires_at | DATETIME | 8B
+
+
+# db size estimation for next 5 years and memory required
+each row = 8+1024+8 = 1040B
+rows in 5 years = 50000 * 365 * 5 = 91250000
+data size in 5 years = 94900000000 = 95GB
+
+primary key has index so it takes around 
+8B + 24B(for each row for other pointers) * 91250000 = 3 GB
+
+- total disk size = ~96GB taking around 500 GB for safety.
+
+since index and also some cache results have to stored in ram it needs memory for indexes and some extra rows and some
+memory for WAL
+- taking round 8 GB of ram for safety
+
+# logic for converting id to scrambled code b64 code
+N = r"a-zA-Z0-9-_"
+
+def encode(n):
+    # converting into base 64 fixed length
+    # adding some randomness salt using revertible logic for predictability
+
+def decode(string):
+    # remove random salt from the string
+    # converting into number
+
+number of charecters needed are figured by how many unique items required at once so 91250000 in 5 years 
+64^4 = 16777216
+64^5 = 1073741824
+
+5 charecters are eough with some head room so we take 5 charecters
+
+# api design
+------------
+we need two apis here for creation and for accessing the long links
+
+POST /api/v1/short_link
+request body
+{
+    long_link: <str>
+}
+responses
+SUCCESS 201 created BODY {short_link: <str>}
+FAILURE 422 client error BODY {fastapi body}
+FAILURE 503 server error BODY "server unavailable"
+
+
+GET /<short_link>
+responses
+SUCCESS 302 temporary redirect HEADERS Location: <long url>
+FAILURE 404 not found
+FAILURE 410 gone  BODY "Link expired"
+FAILURE 503 server error BODY "server unavailable"
+
+# diagram
+----------
+
+/Users/rahulpoluri/Downloads/Screenshot 2026-11-15 at 12.24.49 PM.heic
+
+# removal of expired links 
+can be done by a cron job which runs daily basis and remove the expired links in batches for that day
+removal cron runs in all instances and it can run with postgres pg_try_advisory_lock which ensures only 1 instance
+gets the lock for removal
+
+also ensures that no cron fails then it never sticked to removing state if we maintain one seperate table for storign state
+or we can also use redis with ttl for storing state on which instance got the lock to remove the expried links
+
+
+# check on non functional requirements satisfied
+---------------------------------------
+Availability will be high as we have every made fault tolerant eveyr system and most time taken will be for db
+failure which will be in minutes less than 54 minutes required by 99.99
+we have taken more space then required for 5 years for data storage
+since cache is write through, we will get the links instantly when created 
+if cache miss reteival is less than 10 ms from db as indexes are stored in ram and if cache hit it retrival 
+will be below 5 ms only network delay remains, so this is for the same continent
