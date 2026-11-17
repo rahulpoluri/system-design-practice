@@ -223,7 +223,7 @@ RETURNING *;
 | | A: DELETE on write | B: SET with version (**chosen for tickets**) |
 |---|---|---|
 | Write | UPDATE → DELETE cache key | partial UPDATE … RETURNING * → cache CAS-SET |
-| Author sees own write | author's reads → primary for ~1–2 s (else a lagging replica re-caches the old row) | instantly from cache |
+| Author sees own write | author's reads → primary for ~1–2 s (else a lagging replica re-caches the old row). How: on write set Redis flag `recent_write:{user_id}` TTL 2 s (per USER, separate from the issue cache key); app checks it on every read → exists = primary, else cache → replica | instantly from cache |
 | Extra column | none | `version` on tickets |
 
 Alternatives: Postgres `xmin` (change detection only, wraps around) · CDC / Debezium (one ordered WAL reader updates the cache, LSN = version).
