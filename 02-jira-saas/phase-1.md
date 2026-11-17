@@ -39,9 +39,15 @@ Drafted in `practice.txt`, cleaned up here.
 | Reads | 700k DAU × 50 / 12 h / 3600 × 10 (spikes) | **~8,000 req/s** |
 | Writes | 700k DAU × 5 / 12 h / 3600 × 5 (spikes) | **~400 req/s** |
 
-- Writes = WAL fsync + every index + locks → **one primary** per bank is plenty (Postgres ~1–5k writes/s).
-- Reads = RAM + snapshots → **scale out** with read replicas + Redis cache.
-- Rules of thumb: Postgres ~1–5k writes/s · ~10k+ reads/s · Redis ~100k ops/s.
+- **Writes are expensive and can't be spread out.** Every write must (1) fsync the WAL to disk
+  so it survives a crash, (2) update every index on the table, (3) lock the rows it changes.
+  Only the **primary** accepts writes, so you can't add machines to get more write capacity.
+  → We need ~400 writes/s; one Postgres primary handles ~1–5k/s → **one primary per bank is plenty.**
+- **Reads are cheap and can be copied.** A read is served from RAM (cached pages), and thanks to
+  MVCC snapshots readers never wait for writers. Any copy of the data can answer a read.
+  → We need ~8,000 reads/s; one Postgres does ~10k+/s, which is too tight with spikes
+  → **scale out:** read replicas + Redis cache in front (Redis ~100k ops/s, from RAM).
+- Rules of thumb (one ordinary server): Postgres ~1–5k writes/s · ~10k+ reads/s · Redis ~100k ops/s.
 
 ## 3. API
 
@@ -59,6 +65,7 @@ Drafted in `practice.txt`, cleaned up here.
 | `POST /auth/login` | `{email, password}` | 200 `{access_token (15 min), refresh_token}` | 401 wrong credentials · 429 |
 | `POST /auth/refresh` | `{refresh_token}` | 200 new access token | 401 expired/revoked |
 | `POST /auth/accept-invite` | `{invite_token, password}` | 200 tokens | 410 expired/used |
+| `POST /users/me/password` | `{old_password, new_password}` (user from JWT) | 200 new `{access_token, refresh_token}` — **revokes all other refresh tokens** (bump `token_version`); a stolen access token still works ≤15 min (JWT is signed with the server key, not the password) | 401 bad token · 403 wrong old password · 422 weak / same as old · 429 |
 
 **Tenants** (signup / platform admin)
 | Endpoint | Body | Success | Failures |
